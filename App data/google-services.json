@@ -1,0 +1,42 @@
+{
+  "project_info": {
+    "project_number": "1716741402",
+    "firebase_url": "https://htnfake-3e67c.firebaseio.com",
+    "project_id": "htnfake-3e67c",
+    "storage_bucket": "htnfake-3e67c.appspot.com"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1716741402:android:e3bbb294bc23d39e",
+        "android_client_info": {
+          "package_name": "android.example.com"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "1716741402-bdj0v8r65iv7kjnmjao5k55bjro718s1.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAC3w8GP2-2fu62dIMxl7v6rhsJ6OXIplQ"
+        }
+      ],
+      "services": {
+        "analytics_service": {
+          "status": 1
+        },
+        "appinvite_service": {
+          "status": 1,
+          "other_platform_oauth_client": []
+        },
+        "ads_service": {
+          "status": 2
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
