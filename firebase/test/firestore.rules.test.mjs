@@ -214,8 +214,7 @@ describe('registrations', () => {
 
 // --- Teams, projects, judging, results -------------------------------------------------------
 
-const checkInAll = (ctx, eventId, uids) => {
-  const admin = ctx.firestore();
+const checkInAll = (admin, eventId, uids) => {
   return Promise.all(uids.map((uid) => setDoc(doc(admin, `events/${eventId}/checkIns/${uid}`), {
     userId: uid, checkedInAt: new Date(), checkedInBy: 'vol', method: 'QR',
   })));
@@ -265,13 +264,25 @@ const seedTeam = (admin, projectId, memberIds, assignedJudges = []) => {
 };
 
 describe('teams', () => {
-  beforeEach(() => env.withSecurityRulesDisabled((ctx) => checkInAll(ctx, 'htn', ['ada', 'cat', 'dan', 'eve', 'fay'])));
+  beforeEach(() => env.withSecurityRulesDisabled(async (ctx) => {
+    const admin = ctx.firestore();
+    await checkInAll(admin, 'htn', ['ada', 'cat', 'dan', 'eve', 'fay']);
+    for (const uid of ['gus', 'hal']) {
+      await setDoc(doc(admin, `events/htn/registrations/${uid}`), { userId: uid, registeredAt: new Date() });
+    }
+  }));
 
   test('a checked-in participant creates a team project', async () => {
     await assertSucceeds(createProject('ada', 'TEAMCODE01'));
   });
 
-  test('cannot create a project without being checked in or after the event', async () => {
+  test('registered participants form teams before checking in', async () => {
+    await assertSucceeds(createProject('gus', 'TEAMCODE16'));
+    await assertSucceeds(joinTeam('hal', 'TEAMCODE16'));
+    await assertSucceeds(joinTeam('ada', 'TEAMCODE16')); // checked in without registering (walk-in)
+  });
+
+  test('cannot create a project without registering or checking in, or after the event', async () => {
     await assertFails(createProject('judge', 'TEAMCODE02'));
     await assertFails(createProject('ada', 'TEAMCODE03', 'old'));
   });
@@ -307,7 +318,27 @@ describe('teams', () => {
     await assertFails(joinTeam('fay', 'TEAMCODE10'));
   });
 
-  test('cannot join without being checked in', async () => {
+  test('switching teams: must leave the current team before joining another', async () => {
+    await createProject('ada', 'TEAMCODE17');
+    await createProject('cat', 'TEAMCODE18');
+    await joinTeam('dan', 'TEAMCODE17');
+    await assertFails(joinTeam('dan', 'TEAMCODE18'));
+    await assertSucceeds(leaveTeam('dan', 'TEAMCODE17'));
+    await assertSucceeds(joinTeam('dan', 'TEAMCODE18'));
+    const old = await getDoc(doc(db('ada'), 'events/htn/projects/TEAMCODE17'));
+    if (old.data().memberIds.includes('dan')) throw new Error('dan should have left');
+  });
+
+  test('cannot leave someone else\'s membership behind to sneak into a second team', async () => {
+    await createProject('ada', 'TEAMCODE19');
+    await createProject('cat', 'TEAMCODE20');
+    const fs = db('ada');
+    const batch = writeBatch(fs);
+    batch.update(doc(fs, 'events/htn/projects/TEAMCODE20'), { memberIds: arrayUnion('ada'), 'members.ada': 'ada' });
+    await assertFails(batch.commit()); // ada's existing teamMembers record blocks a second membership
+  });
+
+  test('cannot join without registering or checking in', async () => {
     await createProject('ada', 'TEAMCODE11');
     await assertFails(joinTeam('judge', 'TEAMCODE11'));
   });
