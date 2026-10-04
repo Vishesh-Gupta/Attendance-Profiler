@@ -59,8 +59,8 @@ object AttendanceProfiler {
 
     /**
      * Builds a person's profile. Events before their first engagement don't count against them, and
-     * events after [todayEpochDay] only count once they've checked in. An event is a no-show once its
-     * day has passed without a check-in from someone who registered.
+     * events that haven't ended by [todayEpochDay] only count once they've checked in. An event is a no-show once
+     * it has ended without a check-in from someone who registered.
      */
     fun profile(
         allEvents: List<Event>,
@@ -70,7 +70,7 @@ object AttendanceProfiler {
     ): AttendanceProfile {
         fun statusOf(event: Event): TimelineStatus? = when {
             event.id in attendedEventIds -> TimelineStatus.ATTENDED
-            event.startEpochDay >= todayEpochDay -> null // today or upcoming: no verdict yet
+            !event.isOver(todayEpochDay) -> null // ongoing or upcoming: no verdict yet
             event.id in registeredEventIds -> TimelineStatus.NO_SHOW
             else -> TimelineStatus.MISSED
         }

@@ -20,3 +20,8 @@ fun percent(rate: Double): String = "${Math.round(rate * 100)}%"
 
 /** Firebase exception messages are user-readable; fall back to something generic otherwise. */
 fun Throwable.userMessage(): String = localizedMessage?.takeIf { it.isNotBlank() } ?: "Something went wrong"
+
+/** "Sep 11, 2026" for one-day events, "Sep 11, 2026 – Sep 13, 2026" for longer ones. */
+fun formatEventDates(event: com.example.android.htn.data.Event): String =
+    if (event.endEpochDay == event.startEpochDay) formatEpochDay(event.startEpochDay)
+    else "${formatEpochDay(event.startEpochDay)} – ${formatEpochDay(event.endEpochDay)}"

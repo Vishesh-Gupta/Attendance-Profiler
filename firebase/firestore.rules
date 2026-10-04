@@ -2,8 +2,10 @@ rules_version = '2';
 
 // Roles: PARTICIPANT, JUDGE, VOLUNTEER, ORGANIZER.
 // - Everyone signs up as PARTICIPANT; only organizers can change roles.
-// - Staff (judges, volunteers, organizers) can see people and attendance.
-// - Volunteers and organizers can check people in. Organizers manage events.
+// - Organizers see everything.
+// - Volunteers run check-in: they see people, registrations and check-ins.
+// - Judges only see project submissions and their own scores.
+// - Participants see their own profile, attendance and projects.
 service cloud.firestore {
   match /databases/{database}/documents {
 
@@ -15,23 +17,40 @@ service cloud.firestore {
       return /databases/$(database)/documents/users/$(uid);
     }
 
+    function eventPath(eventId) {
+      return /databases/$(database)/documents/events/$(eventId);
+    }
+
     function hasRole(roles) {
       return signedIn() && exists(userPath(request.auth.uid))
         && get(userPath(request.auth.uid)).data.role in roles;
     }
 
-    function isStaff() { return hasRole(['JUDGE', 'VOLUNTEER', 'ORGANIZER']); }
-    function canCheckIn() { return hasRole(['VOLUNTEER', 'ORGANIZER']); }
     function isOrganizer() { return hasRole(['ORGANIZER']); }
+    function canCheckIn() { return hasRole(['VOLUNTEER', 'ORGANIZER']); }
+    function isJudge() { return hasRole(['JUDGE']); }
+    function canSeeProjects() { return hasRole(['JUDGE', 'ORGANIZER']); }
 
-    function shortText(value, minSize) {
-      return value is string && value.size() >= minSize && value.size() <= 100;
+    function isSelf(uid) { return signedIn() && request.auth.uid == uid; }
+
+    function text(value, minSize, maxSize) {
+      return value is string && value.size() >= minSize && value.size() <= maxSize;
+    }
+
+    function shortText(value, minSize) { return text(value, minSize, 100); }
+
+    // Epoch day (UTC) of the request, with a day of slack either way for time zones.
+    function today() { return int(request.time.toMillis() / 86400000); }
+
+    function eventNotOver(eventId) {
+      let event = get(eventPath(eventId)).data;
+      return event.get('endEpochDay', event.startEpochDay) >= today() - 1;
     }
 
     match /users/{uid} {
-      allow read: if signedIn() && (request.auth.uid == uid || isStaff());
+      allow read: if isSelf(uid) || canCheckIn();
 
-      allow create: if signedIn() && request.auth.uid == uid
+      allow create: if isSelf(uid)
         && request.resource.data.keys().hasOnly(['name', 'email', 'organization', 'role', 'createdAt'])
         && shortText(request.resource.data.name, 1)
         && shortText(request.resource.data.organization, 0)
@@ -40,25 +59,29 @@ service cloud.firestore {
         && request.resource.data.createdAt == request.time;
 
       // Users edit their own name and organization; organizers change other people's roles.
-      allow update: if signedIn() && (
-        (request.auth.uid == uid
+      allow update: if
+        (isSelf(uid)
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name', 'organization'])
           && shortText(request.resource.data.name, 1)
           && shortText(request.resource.data.organization, 0))
-        || (isOrganizer() && request.auth.uid != uid
+        || (isOrganizer() && !isSelf(uid)
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['role'])
-          && request.resource.data.role in ['PARTICIPANT', 'JUDGE', 'VOLUNTEER', 'ORGANIZER'])
-      );
+          && request.resource.data.role in ['PARTICIPANT', 'JUDGE', 'VOLUNTEER', 'ORGANIZER']);
     }
 
     match /events/{eventId} {
       allow read: if signedIn();
 
       allow create: if isOrganizer()
-        && request.resource.data.keys().hasOnly(['name', 'location', 'startEpochDay', 'createdBy', 'createdAt'])
+        && request.resource.data.keys().hasOnly(
+          ['name', 'location', 'description', 'startEpochDay', 'endEpochDay', 'createdBy', 'createdAt'])
         && shortText(request.resource.data.name, 1)
         && shortText(request.resource.data.location, 0)
+        && text(request.resource.data.description, 0, 2000)
         && request.resource.data.startEpochDay is int
+        && request.resource.data.endEpochDay is int
+        && request.resource.data.endEpochDay >= request.resource.data.startEpochDay
+        && request.resource.data.endEpochDay - request.resource.data.startEpochDay <= 31
         && request.resource.data.createdBy == request.auth.uid
         && request.resource.data.createdAt == request.time;
 
@@ -78,24 +101,84 @@ service cloud.firestore {
       }
 
       match /registrations/{userId} {
-        allow create: if signedIn() && request.auth.uid == userId
-          && exists(/databases/$(database)/documents/events/$(eventId))
+        allow create: if isSelf(userId)
+          && exists(eventPath(eventId))
           && request.resource.data.keys().hasOnly(['userId', 'registeredAt'])
           && request.resource.data.userId == userId
           && request.resource.data.registeredAt == request.time;
 
-        allow delete: if signedIn() && (request.auth.uid == userId || isOrganizer());
+        allow delete: if isSelf(userId) || isOrganizer();
+      }
+
+      // Document id is the submitter's uid: one project per person per event. Only people who were
+      // checked in can submit, and only until the event ends.
+      match /projects/{submitterId} {
+        function validProject() {
+          let p = request.resource.data;
+          return p.keys().hasOnly(
+              ['title', 'description', 'link', 'teamMembers', 'submittedBy', 'submitterName', 'createdAt', 'updatedAt'])
+            && shortText(p.title, 1)
+            && text(p.description, 1, 5000)
+            && text(p.link, 0, 500)
+            && p.teamMembers is list && p.teamMembers.size() <= 10
+            && p.submittedBy == submitterId
+            && shortText(p.submitterName, 1)
+            && p.updatedAt == request.time;
+        }
+
+        allow create: if isSelf(submitterId)
+          && exists(/databases/$(database)/documents/events/$(eventId)/checkIns/$(submitterId))
+          && eventNotOver(eventId)
+          && validProject()
+          && request.resource.data.createdAt == request.time;
+
+        allow update: if isSelf(submitterId)
+          && eventNotOver(eventId)
+          && validProject()
+          && request.resource.data.createdAt == resource.data.createdAt;
+
+        allow delete: if (isSelf(submitterId) && eventNotOver(eventId)) || isOrganizer();
+
+        // Document id is the judge's uid: one score per judge per project.
+        match /scores/{judgeId} {
+          function validScore(value) { return value is int && value >= 1 && value <= 10; }
+
+          allow create, update: if isJudge() && isSelf(judgeId)
+            && exists(/databases/$(database)/documents/events/$(eventId)/projects/$(submitterId))
+            && request.resource.data.keys().hasOnly(
+              ['judgeId', 'innovation', 'technical', 'design', 'impact', 'comment', 'updatedAt'])
+            && request.resource.data.judgeId == judgeId
+            && validScore(request.resource.data.innovation)
+            && validScore(request.resource.data.technical)
+            && validScore(request.resource.data.design)
+            && validScore(request.resource.data.impact)
+            && text(request.resource.data.comment, 0, 2000)
+            && request.resource.data.updatedAt == request.time;
+
+          allow delete: if isSelf(judgeId) || isOrganizer();
+        }
       }
     }
 
-    // Reads (including collection-group queries) of check-ins and registrations.
-    // Participants may only read their own, so their queries must filter on userId.
+    // Reads, including collection-group queries. People who may only read their own documents
+    // must filter their queries on the owner field.
     match /{path=**}/checkIns/{userId} {
-      allow read: if isStaff() || (signedIn() && resource.data.userId == request.auth.uid);
+      allow read: if canCheckIn() || (signedIn() && resource.data.userId == request.auth.uid);
     }
 
     match /{path=**}/registrations/{userId} {
-      allow read: if isStaff() || (signedIn() && resource.data.userId == request.auth.uid);
+      allow read: if canCheckIn() || (signedIn() && resource.data.userId == request.auth.uid);
+    }
+
+    match /{path=**}/projects/{submitterId} {
+      // isSelf lets owners read their not-yet-created project (needed before the first submission).
+      allow read: if canSeeProjects() || isSelf(submitterId)
+        || (signedIn() && resource.data.submittedBy == request.auth.uid);
+    }
+
+    // Judges only see their own scores, so they score independently. Organizers see all of them.
+    match /{path=**}/scores/{judgeId} {
+      allow read: if isOrganizer() || (signedIn() && resource.data.judgeId == request.auth.uid);
     }
   }
 }

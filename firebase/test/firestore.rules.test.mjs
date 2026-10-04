@@ -10,6 +10,7 @@ import {
 } from 'firebase/firestore';
 
 let env;
+const TODAY = Math.floor(Date.now() / 86400000);
 
 const people = {
   org: 'ORGANIZER',
@@ -40,7 +41,15 @@ beforeEach(async () => {
       });
     }
     await setDoc(doc(admin, 'events/htn'), {
-      name: 'HTN', location: 'Waterloo', startEpochDay: 100, createdBy: 'org', createdAt: new Date(),
+      name: 'HTN', location: 'Waterloo', description: '', startEpochDay: TODAY - 1, endEpochDay: TODAY + 1,
+      createdBy: 'org', createdAt: new Date(),
+    });
+    await setDoc(doc(admin, 'events/old'), {
+      name: 'Old', location: '', description: '', startEpochDay: TODAY - 30, endEpochDay: TODAY - 28,
+      createdBy: 'org', createdAt: new Date(),
+    });
+    await setDoc(doc(admin, 'events/old/checkIns/ada'), {
+      userId: 'ada', checkedInAt: new Date(), checkedInBy: 'vol', method: 'QR',
     });
     await setDoc(doc(admin, 'events/htn/checkIns/bob'), {
       userId: 'bob', checkedInAt: new Date(), checkedInBy: 'vol', method: 'QR',
@@ -98,16 +107,23 @@ describe('roles', () => {
     await assertFails(updateDoc(doc(db('vol'), 'users/ada'), { role: 'VOLUNTEER' }));
   });
 
-  test('participants can only read their own profile; staff can read everyone', async () => {
+  test('participants can only read their own profile', async () => {
     await assertSucceeds(getDoc(doc(db('ada'), 'users/ada')));
     await assertFails(getDoc(doc(db('ada'), 'users/bob')));
-    await assertSucceeds(getDoc(doc(db('judge'), 'users/ada')));
+  });
+
+  test('organizers and volunteers can read everyone; judges cannot', async () => {
+    await assertSucceeds(getDoc(doc(db('org'), 'users/ada')));
+    await assertSucceeds(getDoc(doc(db('vol'), 'users/ada')));
+    await assertFails(getDoc(doc(db('judge'), 'users/ada')));
+    await assertSucceeds(getDoc(doc(db('judge'), 'users/judge')));
   });
 });
 
 describe('events', () => {
   const event = (by) => ({
-    name: 'HTN 2026', location: 'Waterloo', startEpochDay: 200, createdBy: by, createdAt: serverTimestamp(),
+    name: 'HTN 2026', location: 'Waterloo', description: 'Hackathon', startEpochDay: 200, endEpochDay: 202,
+    createdBy: by, createdAt: serverTimestamp(),
   });
 
   test('only organizers create and delete events', async () => {
@@ -115,6 +131,10 @@ describe('events', () => {
     await assertFails(setDoc(doc(db('vol'), 'events/new2'), event('vol')));
     await assertFails(deleteDoc(doc(db('vol'), 'events/htn')));
     await assertSucceeds(deleteDoc(doc(db('org'), 'events/htn')));
+  });
+
+  test('events must end on or after they start', async () => {
+    await assertFails(setDoc(doc(db('org'), 'events/bad'), { ...event('org'), endEpochDay: 199 }));
   });
 
   test('any signed-in user can read events', async () => {
@@ -154,8 +174,10 @@ describe('check-ins', () => {
     await assertFails(getDoc(doc(db('ada'), 'events/htn/checkIns/bob')));
   });
 
-  test('staff can read all check-ins', async () => {
-    await assertSucceeds(getDocs(collectionGroup(db('judge'), 'checkIns')));
+  test('organizers and volunteers can read all check-ins; judges cannot', async () => {
+    await assertSucceeds(getDocs(collectionGroup(db('org'), 'checkIns')));
+    await assertSucceeds(getDocs(collectionGroup(db('vol'), 'checkIns')));
+    await assertFails(getDocs(collectionGroup(db('judge'), 'checkIns')));
   });
 });
 
@@ -186,5 +208,108 @@ describe('registrations', () => {
   test('participants cannot list other people\'s registrations', async () => {
     await assertFails(getDocs(collectionGroup(db('ada'), 'registrations')));
     await assertSucceeds(getDocs(query(collectionGroup(db('ada'), 'registrations'), where('userId', '==', 'ada'))));
+  });
+});
+
+describe('projects', () => {
+  const project = (uid, overrides = {}) => ({
+    title: 'Hackalytics', description: 'Profiles hackers', link: 'https://github.com/x/y',
+    teamMembers: ['Ada', 'Bob'], submittedBy: uid, submitterName: uid,
+    createdAt: serverTimestamp(), updatedAt: serverTimestamp(), ...overrides,
+  });
+
+  beforeEach(async () => {
+    await env.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), 'events/htn/projects/bob'), {
+        title: 'Bobs bot', description: 'A bot', link: '', teamMembers: [], submittedBy: 'bob',
+        submitterName: 'bob', createdAt: new Date(), updatedAt: new Date(),
+      });
+    });
+  });
+
+  test('checked-in participants can submit their own project', async () => {
+    await env.withSecurityRulesDisabled((ctx) => deleteDoc(doc(ctx.firestore(), 'events/htn/projects/bob')));
+    await assertSucceeds(setDoc(doc(db('bob'), 'events/htn/projects/bob'), project('bob')));
+  });
+
+  test('owners can look up their own project before submitting it', async () => {
+    await assertSucceeds(getDoc(doc(db('ada'), 'events/htn/projects/ada')));
+  });
+
+  test('cannot submit without being checked in, or for someone else', async () => {
+    await assertFails(setDoc(doc(db('ada'), 'events/htn/projects/ada'), project('ada')));
+    await assertFails(setDoc(doc(db('ada'), 'events/htn/projects/bob'), project('bob')));
+  });
+
+  test('cannot submit after the event is over', async () => {
+    await assertFails(setDoc(doc(db('ada'), 'events/old/projects/ada'), project('ada')));
+  });
+
+  test('owners can edit their project but not its creation time', async () => {
+    await assertSucceeds(updateDoc(doc(db('bob'), 'events/htn/projects/bob'),
+      { title: 'Better bot', updatedAt: serverTimestamp() }));
+    await assertFails(updateDoc(doc(db('bob'), 'events/htn/projects/bob'),
+      { createdAt: new Date(0), updatedAt: serverTimestamp() }));
+    await assertFails(updateDoc(doc(db('ada'), 'events/htn/projects/bob'),
+      { title: 'Hijacked', updatedAt: serverTimestamp() }));
+  });
+
+  test('judges and organizers see all projects; volunteers and other participants do not', async () => {
+    await assertSucceeds(getDocs(collectionGroup(db('judge'), 'projects')));
+    await assertSucceeds(getDocs(collectionGroup(db('org'), 'projects')));
+    await assertFails(getDocs(collectionGroup(db('vol'), 'projects')));
+    await assertFails(getDoc(doc(db('ada'), 'events/htn/projects/bob')));
+    await assertSucceeds(getDocs(query(collectionGroup(db('bob'), 'projects'), where('submittedBy', '==', 'bob'))));
+  });
+});
+
+describe('scores', () => {
+  const score = (judgeId, overrides = {}) => ({
+    judgeId, innovation: 8, technical: 7, design: 6, impact: 9, comment: 'Nice', updatedAt: serverTimestamp(),
+    ...overrides,
+  });
+  const path = 'events/htn/projects/bob/scores';
+
+  beforeEach(async () => {
+    await env.withSecurityRulesDisabled(async (ctx) => {
+      const admin = ctx.firestore();
+      await setDoc(doc(admin, 'users/judge2'), {
+        name: 'judge2', email: 'judge2@example.com', organization: '', role: 'JUDGE', createdAt: new Date(),
+      });
+      await setDoc(doc(admin, 'events/htn/projects/bob'), {
+        title: 'Bobs bot', description: 'A bot', link: '', teamMembers: [], submittedBy: 'bob',
+        submitterName: 'bob', createdAt: new Date(), updatedAt: new Date(),
+      });
+      await setDoc(doc(admin, `${path}/judge2`), { ...score('judge2'), updatedAt: new Date() });
+    });
+  });
+
+  test('judges score projects and can revise their score', async () => {
+    await assertSucceeds(setDoc(doc(db('judge'), `${path}/judge`), score('judge')));
+    await assertSucceeds(setDoc(doc(db('judge'), `${path}/judge`), score('judge', { impact: 10 })));
+  });
+
+  test('scores must be whole numbers from 1 to 10', async () => {
+    await assertFails(setDoc(doc(db('judge'), `${path}/judge`), score('judge', { impact: 11 })));
+    await assertFails(setDoc(doc(db('judge'), `${path}/judge`), score('judge', { design: 0 })));
+    await assertFails(setDoc(doc(db('judge'), `${path}/judge`), score('judge', { design: 5.5 })));
+  });
+
+  test('only judges can score, only as themselves, and only real projects', async () => {
+    await assertFails(setDoc(doc(db('org'), `${path}/org`), score('org')));
+    await assertFails(setDoc(doc(db('bob'), `${path}/bob`), score('bob')));
+    await assertFails(setDoc(doc(db('judge'), `${path}/judge2`), score('judge2')));
+    await assertFails(setDoc(doc(db('judge'), 'events/htn/projects/nobody/scores/judge'), score('judge')));
+  });
+
+  test('judges see only their own scores; organizers see all', async () => {
+    await assertFails(getDoc(doc(db('judge'), `${path}/judge2`)));
+    await assertSucceeds(getDocs(query(collectionGroup(db('judge'), 'scores'), where('judgeId', '==', 'judge'))));
+    await assertFails(getDocs(collectionGroup(db('judge'), 'scores')));
+    await assertSucceeds(getDocs(collectionGroup(db('org'), 'scores')));
+  });
+
+  test('participants cannot see scores, even on their own project', async () => {
+    await assertFails(getDoc(doc(db('bob'), `${path}/judge2`)));
   });
 });
