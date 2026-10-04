@@ -1,0 +1,101 @@
+rules_version = '2';
+
+// Roles: PARTICIPANT, JUDGE, VOLUNTEER, ORGANIZER.
+// - Everyone signs up as PARTICIPANT; only organizers can change roles.
+// - Staff (judges, volunteers, organizers) can see people and attendance.
+// - Volunteers and organizers can check people in. Organizers manage events.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function userPath(uid) {
+      return /databases/$(database)/documents/users/$(uid);
+    }
+
+    function hasRole(roles) {
+      return signedIn() && exists(userPath(request.auth.uid))
+        && get(userPath(request.auth.uid)).data.role in roles;
+    }
+
+    function isStaff() { return hasRole(['JUDGE', 'VOLUNTEER', 'ORGANIZER']); }
+    function canCheckIn() { return hasRole(['VOLUNTEER', 'ORGANIZER']); }
+    function isOrganizer() { return hasRole(['ORGANIZER']); }
+
+    function shortText(value, minSize) {
+      return value is string && value.size() >= minSize && value.size() <= 100;
+    }
+
+    match /users/{uid} {
+      allow read: if signedIn() && (request.auth.uid == uid || isStaff());
+
+      allow create: if signedIn() && request.auth.uid == uid
+        && request.resource.data.keys().hasOnly(['name', 'email', 'organization', 'role', 'createdAt'])
+        && shortText(request.resource.data.name, 1)
+        && shortText(request.resource.data.organization, 0)
+        && request.resource.data.email == request.auth.token.email
+        && request.resource.data.role == 'PARTICIPANT'
+        && request.resource.data.createdAt == request.time;
+
+      // Users edit their own name and organization; organizers change other people's roles.
+      allow update: if signedIn() && (
+        (request.auth.uid == uid
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name', 'organization'])
+          && shortText(request.resource.data.name, 1)
+          && shortText(request.resource.data.organization, 0))
+        || (isOrganizer() && request.auth.uid != uid
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['role'])
+          && request.resource.data.role in ['PARTICIPANT', 'JUDGE', 'VOLUNTEER', 'ORGANIZER'])
+      );
+    }
+
+    match /events/{eventId} {
+      allow read: if signedIn();
+
+      allow create: if isOrganizer()
+        && request.resource.data.keys().hasOnly(['name', 'location', 'startEpochDay', 'createdBy', 'createdAt'])
+        && shortText(request.resource.data.name, 1)
+        && shortText(request.resource.data.location, 0)
+        && request.resource.data.startEpochDay is int
+        && request.resource.data.createdBy == request.auth.uid
+        && request.resource.data.createdAt == request.time;
+
+      allow delete: if isOrganizer();
+
+      // Document id is the attendee's uid, so each person checks in at most once per event.
+      match /checkIns/{userId} {
+        allow create: if canCheckIn()
+          && exists(userPath(userId))
+          && request.resource.data.keys().hasOnly(['userId', 'checkedInAt', 'checkedInBy', 'method'])
+          && request.resource.data.userId == userId
+          && request.resource.data.checkedInBy == request.auth.uid
+          && request.resource.data.checkedInAt == request.time
+          && request.resource.data.method in ['QR', 'MANUAL'];
+
+        allow delete: if canCheckIn();
+      }
+
+      match /registrations/{userId} {
+        allow create: if signedIn() && request.auth.uid == userId
+          && exists(/databases/$(database)/documents/events/$(eventId))
+          && request.resource.data.keys().hasOnly(['userId', 'registeredAt'])
+          && request.resource.data.userId == userId
+          && request.resource.data.registeredAt == request.time;
+
+        allow delete: if signedIn() && (request.auth.uid == userId || isOrganizer());
+      }
+    }
+
+    // Reads (including collection-group queries) of check-ins and registrations.
+    // Participants may only read their own, so their queries must filter on userId.
+    match /{path=**}/checkIns/{userId} {
+      allow read: if isStaff() || (signedIn() && resource.data.userId == request.auth.uid);
+    }
+
+    match /{path=**}/registrations/{userId} {
+      allow read: if isStaff() || (signedIn() && resource.data.userId == request.auth.uid);
+    }
+  }
+}
