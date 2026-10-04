@@ -50,10 +50,15 @@ data class CheckIn(
     val method: CheckInMethod,
 )
 
-/** An application to attend an event. Organizers review each one; the applicant is emailed the decision. */
+/**
+ * An application to attend an event. Organizers review each one and the applicant is emailed the
+ * decision. Approved applicants confirm their spot with the button in that email (CONFIRMED); only
+ * confirmed people can form teams or be checked in.
+ */
 enum class RegistrationStatus(val label: String) {
     PENDING("Pending review"),
-    APPROVED("Approved"),
+    APPROVED("Approved, awaiting confirmation"),
+    CONFIRMED("Confirmed"),
     WAITLISTED("Waitlisted"),
     DECLINED("Declined");
 
@@ -70,14 +75,16 @@ data class Registration(
     val registeredAt: Long = 0,
     /** The last decision the applicant was emailed about, set by the onRegistrationDecision function. */
     val notifiedStatus: RegistrationStatus? = null,
+    /** "email" when the applicant confirmed with the email button; null if an organizer did it. */
+    val confirmedVia: String? = null,
 ) {
-    val approved: Boolean get() = status == RegistrationStatus.APPROVED
+    val confirmed: Boolean get() = status == RegistrationStatus.CONFIRMED
 }
 
 sealed interface CheckInResult {
     data class CheckedIn(val user: UserProfile) : CheckInResult
     data class AlreadyCheckedIn(val user: UserProfile) : CheckInResult
-    /** Participants must have an approved application; [status] is null if they never applied. */
+    /** Participants must have confirmed their spot; [status] is null if they never applied. */
     data class NotApproved(val user: UserProfile, val status: RegistrationStatus?) : CheckInResult
     data object UnknownUser : CheckInResult
 }

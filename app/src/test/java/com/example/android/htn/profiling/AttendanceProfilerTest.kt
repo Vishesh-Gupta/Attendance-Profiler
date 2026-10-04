@@ -26,7 +26,7 @@ class AttendanceProfilerTest {
 
     private fun user(uid: String, role: Role = Role.PARTICIPANT) = UserProfile(uid, uid, "$uid@x.com", "", role)
     private fun checkIn(eventId: String, uid: String) = CheckIn(eventId, uid, 0, "vol", CheckInMethod.QR)
-    private fun approved(eventId: String, uid: String) = Registration(eventId, uid, RegistrationStatus.APPROVED)
+    private fun approved(eventId: String, uid: String) = Registration(eventId, uid, RegistrationStatus.CONFIRMED)
 
     @Test
     fun noActivity_givesEmptyProfile() {
@@ -128,8 +128,9 @@ class AttendanceProfilerTest {
     }
 
     @Test
-    fun onlyApprovedApplicationsCanBeNoShows() {
+    fun onlyConfirmedSpotsCanBeNoShows() {
         val registrations = listOf(
+            Registration("e2", "ada", RegistrationStatus.APPROVED), // approved but never confirmed
             Registration("e3", "ada", RegistrationStatus.DECLINED),
             Registration("e4", "ada", RegistrationStatus.WAITLISTED),
             Registration("e5", "ada", RegistrationStatus.PENDING),

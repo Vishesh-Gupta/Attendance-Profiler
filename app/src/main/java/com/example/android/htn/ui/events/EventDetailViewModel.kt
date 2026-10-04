@@ -135,18 +135,26 @@ class EventDetailViewModel(
         _lastScan.value = null
     }
 
-    /** Organizers only: approves the application (which emails the person) and checks them in. */
+    /**
+     * Organizers only, at the desk: marks the person confirmed (they're here, so there's nothing to
+     * confirm by email) and checks them in. They're emailed a confirmation receipt.
+     */
     fun approveAndCheckIn(user: UserProfile, method: CheckInMethod) = viewModelScope.launch {
         _lastScan.value = try {
             if (state.value.applications[user.uid] == null) {
-                repository.registerOnBehalf(eventId, user.uid, RegistrationStatus.APPROVED, me.uid)
+                repository.registerOnBehalf(eventId, user.uid, RegistrationStatus.CONFIRMED, me.uid)
             } else {
-                repository.setRegistrationStatus(eventId, user.uid, RegistrationStatus.APPROVED, me.uid)
+                repository.setRegistrationStatus(eventId, user.uid, RegistrationStatus.CONFIRMED, me.uid)
             }
             ScanOutcome.Done(repository.checkIn(eventId, user.uid, me.uid, method), method)
         } catch (e: Exception) {
             ScanOutcome.Failed(e.userMessage())
         }
+    }
+
+    fun resendConfirmationEmail() = launchReporting {
+        repository.resendConfirmationEmail(eventId, me.uid)
+        messageChannel.trySend("Sent. Check your email for the Confirm button.")
     }
 
     fun undoCheckIn(userId: String) = launchReporting { repository.undoCheckIn(eventId, userId) }

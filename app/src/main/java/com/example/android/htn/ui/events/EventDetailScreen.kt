@@ -123,9 +123,11 @@ fun EventDetailScreen(
                     val eventOver = event.isOver(todayEpochDay())
                     MyStatusCard(
                         status = state.myStatus,
+                        email = me.email,
                         checkedIn = state.checkedIn,
                         upcoming = !eventOver,
                         onSetRegistered = vm::setRegistered,
+                        onResendEmail = vm::resendConfirmationEmail,
                     )
                     if (me.role.canSeeEveryone) {
                         ApplicationsCard(state.applications.values.groupingBy { it }.eachCount(), onOpenApplications)
@@ -136,7 +138,7 @@ fun EventDetailScreen(
                     if (me.role == Role.PARTICIPANT) {
                         TeamCard(
                             state.myTeam,
-                            approved = state.myStatus == RegistrationStatus.APPROVED,
+                            status = state.myStatus,
                             eventOver = eventOver,
                             onOpen = onOpenTeam,
                         )
@@ -179,9 +181,11 @@ fun EventDetailScreen(
 @Composable
 private fun MyStatusCard(
     status: RegistrationStatus?,
+    email: String,
     checkedIn: Boolean,
     upcoming: Boolean,
     onSetRegistered: (Boolean) -> Unit,
+    onResendEmail: () -> Unit,
 ) {
     var confirmWithdraw by remember { mutableStateOf(false) }
     Card(Modifier.fillMaxWidth()) {
@@ -189,7 +193,7 @@ private fun MyStatusCard(
             when {
                 checkedIn -> Text("You're checked in.", style = MaterialTheme.typography.titleMedium)
                 !upcoming -> Text(
-                    if (status == RegistrationStatus.APPROVED) "You were approved but weren't checked in."
+                    if (status == RegistrationStatus.CONFIRMED) "You confirmed but weren't checked in."
                     else "You didn't attend this event."
                 )
                 status == null -> {
@@ -200,7 +204,8 @@ private fun MyStatusCard(
                     Text(
                         when (status) {
                             RegistrationStatus.PENDING -> "Application received"
-                            RegistrationStatus.APPROVED -> "You're approved!"
+                            RegistrationStatus.APPROVED -> "You're approved! Confirm your spot"
+                            RegistrationStatus.CONFIRMED -> "You're confirmed!"
                             RegistrationStatus.WAITLISTED -> "You're on the waitlist"
                             RegistrationStatus.DECLINED -> "Application not accepted"
                         },
@@ -209,13 +214,21 @@ private fun MyStatusCard(
                     Text(
                         when (status) {
                             RegistrationStatus.PENDING -> "Organizers are reviewing applications. We'll email you with their decision."
-                            RegistrationStatus.APPROVED -> "Form your team below, and show your pass at check-in."
+                            RegistrationStatus.APPROVED ->
+                                "Tap \"Confirm my spot\" in the email we sent to $email. You can't form a team or " +
+                                    "check in until you do."
+                            RegistrationStatus.CONFIRMED -> "Form your team below, and show your pass at check-in."
                             RegistrationStatus.WAITLISTED -> "We'll email you if a spot opens up."
                             RegistrationStatus.DECLINED -> "Unfortunately there isn't a spot for you at this event."
                         }
                     )
+                    if (status == RegistrationStatus.APPROVED) {
+                        Button(onClick = onResendEmail) { Text("Resend confirmation email") }
+                    }
                     if (status != RegistrationStatus.DECLINED) {
-                        OutlinedButton(onClick = { confirmWithdraw = true }) { Text("Withdraw application") }
+                        OutlinedButton(onClick = { confirmWithdraw = true }) {
+                            Text(if (status == RegistrationStatus.CONFIRMED) "I can't make it" else "Withdraw application")
+                        }
                     }
                 }
             }
@@ -249,7 +262,7 @@ private fun ApplicationsCard(counts: Map<RegistrationStatus, Int>, onOpen: () ->
 }
 
 @Composable
-private fun TeamCard(team: Project?, approved: Boolean, eventOver: Boolean, onOpen: () -> Unit) {
+private fun TeamCard(team: Project?, status: RegistrationStatus?, eventOver: Boolean, onOpen: () -> Unit) {
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("Your team", style = MaterialTheme.typography.titleMedium)
@@ -260,7 +273,11 @@ private fun TeamCard(team: Project?, approved: Boolean, eventOver: Boolean, onOp
                     OutlinedButton(onClick = onOpen) { Text(if (eventOver) "View project" else "Manage, edit or switch team") }
                 }
                 eventOver -> Text("You didn't submit a project for this event.")
-                !approved -> Text("Once your application is approved, you can start a team project or join your teammates'. No need to wait for check-in.")
+                status == RegistrationStatus.APPROVED -> Text("Confirm your spot from the email first, then you can start or join a team.")
+                status != RegistrationStatus.CONFIRMED -> Text(
+                    "Once you're approved and have confirmed your spot, you can start a team project or join your " +
+                        "teammates'. No need to wait for check-in."
+                )
                 else -> {
                     Text("Start a team project, or join your teammates with their team code.")
                     Button(onClick = onOpen) { Text("Create or join a team") }
@@ -316,7 +333,7 @@ private fun ScanResultCard(
             is CheckInResult.AlreadyCheckedIn -> Triple(Color(0xFFF9A825), "Already checked in: ${r.user.name}", r.user.role.label)
             is CheckInResult.NotApproved -> Triple(
                 Color(0xFFC62828),
-                "Not approved: ${r.user.name}",
+                if (r.status == RegistrationStatus.APPROVED) "Not confirmed: ${r.user.name}" else "Not approved: ${r.user.name}",
                 (r.status?.let { "Application: ${it.label.lowercase()}." } ?: "They never applied.") +
                     if (canApprove) "" else " Ask an organizer.",
             )
@@ -338,7 +355,7 @@ private fun ScanResultCard(
                     Button(
                         onClick = { onApproveAndCheckIn(result.user, method) },
                         colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Color(0xFFC62828)),
-                    ) { Text("Approve & check in") }
+                    ) { Text(if (result.status == RegistrationStatus.APPROVED) "Confirm & check in" else "Approve & check in") }
                 }
             }
             IconButton(onClick = onDismiss) { Icon(Icons.Filled.Clear, contentDescription = "Dismiss") }
@@ -365,7 +382,7 @@ private fun LazyListScope.manualCheckIn(state: EventDetailState, canApprove: Boo
             )
             matches.forEach { person ->
                 val application = state.applications[person.uid]
-                val needsApproval = person.role == Role.PARTICIPANT && application != RegistrationStatus.APPROVED
+                val needsApproval = person.role == Role.PARTICIPANT && application != RegistrationStatus.CONFIRMED
                 ListItem(
                     headlineContent = { Text(person.name) },
                     supportingContent = {
@@ -380,8 +397,11 @@ private fun LazyListScope.manualCheckIn(state: EventDetailState, canApprove: Boo
                             needsApproval && canApprove -> Button(onClick = {
                                 vm.approveAndCheckIn(person, CheckInMethod.MANUAL)
                                 query = ""
-                            }) { Text("Approve & check in") }
-                            needsApproval -> Text("Not approved", color = MaterialTheme.colorScheme.error)
+                            }) { Text(if (application == RegistrationStatus.APPROVED) "Confirm & check in" else "Approve & check in") }
+                            needsApproval -> Text(
+                                if (application == RegistrationStatus.APPROVED) "Not confirmed" else "Not approved",
+                                color = MaterialTheme.colorScheme.error,
+                            )
                             else -> Button(onClick = {
                                 vm.checkIn(person.uid, CheckInMethod.MANUAL)
                                 query = ""
@@ -414,7 +434,7 @@ private fun LazyListScope.attendance(
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 StatCard("Checked in", "${summary.checkedIn}", Modifier.weight(1f))
-                StatCard("Approved", "${summary.registered}", Modifier.weight(1f))
+                StatCard("Confirmed", "${summary.registered}", Modifier.weight(1f))
                 StatCard("Not arrived", "${summary.notYetArrived}", Modifier.weight(1f))
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
