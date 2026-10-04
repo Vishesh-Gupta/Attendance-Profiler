@@ -62,21 +62,26 @@ Everyone signs up as a **participant**. Organizers promote people from the perso
     **Approve/Confirm & check in** at the desk, including walk-ins who never applied.
   - Organizers see where each applicant is: "Approval emailed. Waiting for them to confirm",
     "Confirmed from the email", and so on.
-  - Applicants can withdraw ("I can't make it" once confirmed). Applying again puts them back in
-    the queue.
+  - Applicants can withdraw ("I can't make it" once confirmed), and applying again puts them back
+    in the queue. **Approved and confirmed people can't withdraw in the final 14 days before the
+    event.** Pending applicants still can, and organizers can still remove anyone.
 - **QR check-in desk** (volunteers and organizers): scan someone's pass, or search for them by name
   if they don't have their phone. A large green, amber or red card shows the result. Each person can
   only check in once per event.
 - **Teams**: everyone registers with their own account, then builds a project together. Teams can
-  form as soon as people confirm their spot; nobody has to wait for check-in. One teammate creates the team
-  project and gets a **team code** (like `ABCDE-FGHJK`) with a QR code and a Share button.
+  form as soon as people confirm their spot; nobody has to wait for check-in. One teammate creates
+  the team project and gets a **team code** (like `ABCDE-FGHJK`) with a QR code and a Share button.
   Teammates join by scanning that QR code or typing the code. Rules:
   - Teams have at most 4 members.
-  - You must be registered (or checked in as a walk-in) to create or join a team.
+  - You must be approved and have confirmed your spot to create or join a team (check-in isn't
+    needed).
+  - **Teams lock 14 days before the event starts.** After that nobody can create, join, leave or
+    switch teams. Members can keep editing the project details until the event ends. The app, the
+    approval email and the confirmation email all show the deadline.
   - Each person can be on only one team per event. To switch, leave your current team first, then
     join or start another.
-  - Any member can edit the project until the event ends. The last member to leave deletes the
-    project.
+  - Any member can edit the project until the event ends. Before the lock, the last member to
+    leave deletes the project.
 - **Judge assignment** (organizers): *Auto-assign judges* gives every project the chosen number of
   judges and balances the load across judges, keeping any existing assignments. Organizers can also
   assign or unassign judges by hand on each project. Judges only see and score the projects

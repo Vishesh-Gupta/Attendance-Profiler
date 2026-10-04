@@ -306,7 +306,8 @@ class AttendanceRepository(private val db: FirebaseFirestore) {
                     FirebaseFirestoreException.Code.NOT_FOUND -> "No team has that code for this event."
                     FirebaseFirestoreException.Code.PERMISSION_DENIED ->
                         "Couldn't join. The team may be full (max ${Project.MAX_TEAM_SIZE}), you may still be on " +
-                            "another team (leave it first), or you haven't confirmed your spot yet."
+                            "another team (leave it first), you haven't confirmed your spot yet, or teams are locked " +
+                            "(${Event.TEAM_LOCK_DAYS} days before the event)."
                     else -> e.localizedMessage ?: "Couldn't join the team."
                 },
                 e,

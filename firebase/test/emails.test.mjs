@@ -21,6 +21,14 @@ describe('decision emails', () => {
     assert.match(mail.message.text, /Waterloo/);
   });
 
+  test('approval and confirmation emails state the team deadline (14 days before the start)', () => {
+    for (const mail of [decisionEmail('APPROVED', htn, ada, link), decisionEmail('CONFIRMED', htn, ada)]) {
+      assert.match(mail.message.text, /teams must be formed by Fri, August 28, 2026/);
+      assert.match(mail.message.text, /can't withdraw/);
+    }
+    assert.doesNotMatch(decisionEmail('DECLINED', htn, ada).message.text, /teams must be formed/);
+  });
+
   test('approval emails cannot go out without a confirmation link', () => {
     assert.throws(() => decisionEmail('APPROVED', htn, ada));
   });
