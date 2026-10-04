@@ -50,14 +50,35 @@ data class CheckIn(
     val method: CheckInMethod,
 )
 
+/** An application to attend an event. Organizers review each one; the applicant is emailed the decision. */
+enum class RegistrationStatus(val label: String) {
+    PENDING("Pending review"),
+    APPROVED("Approved"),
+    WAITLISTED("Waitlisted"),
+    DECLINED("Declined");
+
+    companion object {
+        /** Registrations from before applications were reviewed have no status. */
+        fun parse(value: String?): RegistrationStatus = entries.firstOrNull { it.name == value } ?: PENDING
+    }
+}
+
 data class Registration(
     val eventId: String,
     val userId: String,
-)
+    val status: RegistrationStatus,
+    val registeredAt: Long = 0,
+    /** The last decision the applicant was emailed about, set by the onRegistrationDecision function. */
+    val notifiedStatus: RegistrationStatus? = null,
+) {
+    val approved: Boolean get() = status == RegistrationStatus.APPROVED
+}
 
 sealed interface CheckInResult {
     data class CheckedIn(val user: UserProfile) : CheckInResult
     data class AlreadyCheckedIn(val user: UserProfile) : CheckInResult
+    /** Participants must have an approved application; [status] is null if they never applied. */
+    data class NotApproved(val user: UserProfile, val status: RegistrationStatus?) : CheckInResult
     data object UnknownUser : CheckInResult
 }
 

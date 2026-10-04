@@ -143,7 +143,24 @@ describe('events', () => {
   });
 });
 
+const approve = (admin, eventId, uid, status = 'APPROVED') =>
+  setDoc(doc(admin, `events/${eventId}/registrations/${uid}`), { userId: uid, registeredAt: new Date(), status });
+
 describe('check-ins', () => {
+  beforeEach(() => env.withSecurityRulesDisabled((ctx) => approve(ctx.firestore(), 'htn', 'ada')));
+
+  test('participants must be approved before they can be checked in', async () => {
+    await env.withSecurityRulesDisabled((ctx) => approve(ctx.firestore(), 'htn', 'ada', 'WAITLISTED'));
+    await assertFails(setDoc(doc(db('vol'), 'events/htn/checkIns/ada'), checkIn('vol', 'ada')));
+    await env.withSecurityRulesDisabled((ctx) => deleteDoc(doc(ctx.firestore(), 'events/htn/registrations/ada')));
+    await assertFails(setDoc(doc(db('vol'), 'events/htn/checkIns/ada'), checkIn('vol', 'ada')));
+  });
+
+  test('judges, volunteers and organizers can be checked in without applying', async () => {
+    await assertSucceeds(setDoc(doc(db('org'), 'events/htn/checkIns/judge'), checkIn('org', 'judge')));
+    await assertSucceeds(setDoc(doc(db('org'), 'events/htn/checkIns/vol'), checkIn('org', 'vol')));
+  });
+
   test('volunteers and organizers can check people in', async () => {
     await assertSucceeds(setDoc(doc(db('vol'), 'events/htn/checkIns/ada'), checkIn('vol', 'ada')));
     await assertSucceeds(setDoc(doc(db('org'), 'events/htn/checkIns/judge'), checkIn('org', 'judge', { method: 'MANUAL' })));
@@ -183,7 +200,37 @@ describe('check-ins', () => {
 });
 
 describe('registrations', () => {
-  const registration = (uid) => ({ userId: uid, registeredAt: serverTimestamp() });
+  const registration = (uid, status = 'PENDING') => ({ userId: uid, registeredAt: serverTimestamp(), status });
+  const decide = (status, by = 'org') => ({ status, reviewedBy: by, reviewedAt: serverTimestamp() });
+
+  test('applications start as pending; applicants cannot approve themselves', async () => {
+    await assertFails(setDoc(doc(db('ada'), 'events/htn/registrations/ada'), registration('ada', 'APPROVED')));
+    await assertSucceeds(setDoc(doc(db('ada'), 'events/htn/registrations/ada'), registration('ada')));
+    await assertFails(updateDoc(doc(db('ada'), 'events/htn/registrations/ada'), decide('APPROVED', 'ada')));
+  });
+
+  test('only organizers decide on applications', async () => {
+    await setDoc(doc(db('ada'), 'events/htn/registrations/ada'), registration('ada'));
+    await assertFails(updateDoc(doc(db('vol'), 'events/htn/registrations/ada'), decide('APPROVED', 'vol')));
+    await assertFails(updateDoc(doc(db('judge'), 'events/htn/registrations/ada'), decide('APPROVED', 'judge')));
+    for (const status of ['APPROVED', 'WAITLISTED', 'DECLINED', 'PENDING']) {
+      await assertSucceeds(updateDoc(doc(db('org'), 'events/htn/registrations/ada'), decide(status)));
+    }
+    await assertFails(updateDoc(doc(db('org'), 'events/htn/registrations/ada'), decide('MAYBE')));
+    await assertFails(updateDoc(doc(db('org'), 'events/htn/registrations/ada'), decide('APPROVED', 'vol')));
+    await assertFails(updateDoc(doc(db('org'), 'events/htn/registrations/ada'), { ...decide('APPROVED'), userId: 'bob' }));
+  });
+
+  test('organizers can approve someone who never applied; volunteers cannot', async () => {
+    const onBehalf = (by) => ({ userId: 'ada', registeredAt: serverTimestamp(), status: 'APPROVED', reviewedBy: by, reviewedAt: serverTimestamp() });
+    await assertFails(setDoc(doc(db('vol'), 'events/htn/registrations/ada'), onBehalf('vol')));
+    await assertFails(setDoc(doc(db('org'), 'events/htn/registrations/ghost'), { ...onBehalf('org'), userId: 'ghost' }));
+    await assertSucceeds(setDoc(doc(db('org'), 'events/htn/registrations/ada'), onBehalf('org')));
+  });
+
+  test('cannot apply to an event that is over', async () => {
+    await assertFails(setDoc(doc(db('ada'), 'events/old/registrations/ada'), registration('ada')));
+  });
 
   test('users register themselves only', async () => {
     await assertSucceeds(setDoc(doc(db('ada'), 'events/htn/registrations/ada'), registration('ada')));
@@ -267,22 +314,28 @@ describe('teams', () => {
   beforeEach(() => env.withSecurityRulesDisabled(async (ctx) => {
     const admin = ctx.firestore();
     await checkInAll(admin, 'htn', ['ada', 'cat', 'dan', 'eve', 'fay']);
-    for (const uid of ['gus', 'hal']) {
-      await setDoc(doc(admin, `events/htn/registrations/${uid}`), { userId: uid, registeredAt: new Date() });
-    }
+    for (const uid of ['ada', 'cat', 'dan', 'eve', 'fay', 'gus', 'hal']) await approve(admin, 'htn', uid);
+    await approve(admin, 'htn', 'ivy', 'PENDING');
+    await approve(admin, 'htn', 'jo', 'WAITLISTED');
   }));
 
   test('a checked-in participant creates a team project', async () => {
     await assertSucceeds(createProject('ada', 'TEAMCODE01'));
   });
 
-  test('registered participants form teams before checking in', async () => {
+  test('approved participants form teams before checking in', async () => {
     await assertSucceeds(createProject('gus', 'TEAMCODE16'));
     await assertSucceeds(joinTeam('hal', 'TEAMCODE16'));
-    await assertSucceeds(joinTeam('ada', 'TEAMCODE16')); // checked in without registering (walk-in)
   });
 
-  test('cannot create a project without registering or checking in, or after the event', async () => {
+  test('pending or waitlisted applicants cannot create or join teams', async () => {
+    await createProject('gus', 'TEAMCODE21');
+    await assertFails(createProject('ivy', 'TEAMCODE22'));
+    await assertFails(joinTeam('ivy', 'TEAMCODE21'));
+    await assertFails(joinTeam('jo', 'TEAMCODE21'));
+  });
+
+  test('cannot create a project without approval, or after the event', async () => {
     await assertFails(createProject('judge', 'TEAMCODE02'));
     await assertFails(createProject('ada', 'TEAMCODE03', 'old'));
   });
@@ -338,7 +391,7 @@ describe('teams', () => {
     await assertFails(batch.commit()); // ada's existing teamMembers record blocks a second membership
   });
 
-  test('cannot join without registering or checking in', async () => {
+  test('cannot join without being approved', async () => {
     await createProject('ada', 'TEAMCODE11');
     await assertFails(joinTeam('judge', 'TEAMCODE11'));
   });

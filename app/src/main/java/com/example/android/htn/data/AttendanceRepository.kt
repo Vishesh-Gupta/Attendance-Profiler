@@ -24,7 +24,8 @@ import kotlinx.coroutines.tasks.await
  *   events/{eventId}                             name, location, description, startEpochDay, endEpochDay,
  *                                                createdBy, createdAt
  *   events/{eventId}/checkIns/{uid}              userId, checkedInAt, checkedInBy, method
- *   events/{eventId}/registrations/{uid}         userId, registeredAt
+ *   events/{eventId}/registrations/{uid}         userId, registeredAt, status, reviewedBy, reviewedAt,
+ *                                                notifiedStatus, notifiedAt (set by Cloud Functions)
  *   events/{eventId}/projects/{teamCode}         title, description, link, memberIds, members {uid: name},
  *                                                createdBy, assignedJudges, createdAt, updatedAt
  *   events/{eventId}/projects/{teamCode}/scores/{judgeUid}
@@ -116,22 +117,68 @@ class AttendanceRepository(private val db: FirebaseFirestore) {
         db.collectionGroup("registrations").whereEqualTo("userId", uid).snapshots()
             .map { s -> s.documents.mapNotNull { it.toRegistration() } }.logErrors(emptyList())
 
+    /** Applies to attend. Organizers then approve, waitlist or decline. */
     suspend fun register(eventId: String, uid: String) {
-        events.document(eventId).collection("registrations").document(uid)
-            .set(mapOf("userId" to uid, "registeredAt" to FieldValue.serverTimestamp())).await()
+        events.document(eventId).collection("registrations").document(uid).set(
+            mapOf(
+                "userId" to uid,
+                "registeredAt" to FieldValue.serverTimestamp(),
+                "status" to RegistrationStatus.PENDING.name,
+            )
+        ).await()
+    }
+
+    /**
+     * Organizers only: records a decision for someone who never applied, such as a walk-in. Like
+     * [setRegistrationStatus], this emails them.
+     */
+    suspend fun registerOnBehalf(eventId: String, uid: String, status: RegistrationStatus, reviewer: String) {
+        events.document(eventId).collection("registrations").document(uid).set(
+            mapOf(
+                "userId" to uid,
+                "registeredAt" to FieldValue.serverTimestamp(),
+                "status" to status.name,
+                "reviewedBy" to reviewer,
+                "reviewedAt" to FieldValue.serverTimestamp(),
+            )
+        ).await()
+    }
+
+    /**
+     * Organizers only. Changing the status to approved, waitlisted or declined emails the applicant
+     * (see firebase/functions).
+     */
+    suspend fun setRegistrationStatus(eventId: String, uid: String, status: RegistrationStatus, reviewer: String) {
+        events.document(eventId).collection("registrations").document(uid).update(
+            mapOf(
+                "status" to status.name,
+                "reviewedBy" to reviewer,
+                "reviewedAt" to FieldValue.serverTimestamp(),
+            )
+        ).await()
     }
 
     suspend fun unregister(eventId: String, uid: String) {
         events.document(eventId).collection("registrations").document(uid).delete().await()
     }
 
-    /** Volunteers and organizers only. Needs a connection, since it checks for an existing check-in. */
+    /**
+     * Volunteers and organizers only. Participants need an approved application. Needs a connection,
+     * since it checks for an existing check-in.
+     */
     suspend fun checkIn(eventId: String, userId: String, checkedInBy: String, method: CheckInMethod): CheckInResult {
         val userRef = users.document(userId)
         val checkInRef = events.document(eventId).collection("checkIns").document(userId)
+        val registrationRef = events.document(eventId).collection("registrations").document(userId)
         return db.runTransaction { tx ->
             val user = tx.get(userRef).toUser() ?: return@runTransaction CheckInResult.UnknownUser
             if (tx.get(checkInRef).exists()) return@runTransaction CheckInResult.AlreadyCheckedIn(user)
+            if (user.role == Role.PARTICIPANT) {
+                val registration = tx.get(registrationRef).toRegistration()
+                if (registration?.approved != true) {
+                    return@runTransaction CheckInResult.NotApproved(user, registration?.status)
+                }
+            }
             tx.set(
                 checkInRef,
                 mapOf(
@@ -189,7 +236,7 @@ class AttendanceRepository(private val db: FirebaseFirestore) {
 
     /**
      * Starts a team project with [me] as its first member. Returns the team code. [me] must be
-     * registered or checked in and not on another team for this event.
+     * approved for the event and not on another team.
      */
     suspend fun createProject(eventId: String, me: UserProfile, title: String, description: String, link: String): String {
         val code = TeamCode.generate()
@@ -225,7 +272,7 @@ class AttendanceRepository(private val db: FirebaseFirestore) {
     }
 
     /**
-     * Adds [me] to the team with [code]. [me] must be registered or checked in, and must have left any
+     * Adds [me] to the team with [code]. [me] must be approved for the event, and must have left any
      * other team for this event first. People can't read a team before joining it, so the reasons a
      * join is refused are reported together.
      */
@@ -245,7 +292,7 @@ class AttendanceRepository(private val db: FirebaseFirestore) {
                     FirebaseFirestoreException.Code.NOT_FOUND -> "No team has that code for this event."
                     FirebaseFirestoreException.Code.PERMISSION_DENIED ->
                         "Couldn't join. The team may be full (max ${Project.MAX_TEAM_SIZE}), you may still be on " +
-                            "another team (leave it first), or you haven't registered for this event."
+                            "another team (leave it first), or your application hasn't been approved yet."
                     else -> e.localizedMessage ?: "Couldn't join the team."
                 },
                 e,
@@ -393,8 +440,15 @@ private fun DocumentSnapshot.toCheckIn(): CheckIn? {
 }
 
 private fun DocumentSnapshot.toRegistration(): Registration? {
+    if (!exists()) return null
     val eventId = reference.parent.parent?.id ?: return null
-    return Registration(eventId = eventId, userId = getString("userId") ?: return null)
+    return Registration(
+        eventId = eventId,
+        userId = getString("userId") ?: return null,
+        status = RegistrationStatus.parse(getString("status")),
+        registeredAt = getTimestamp("registeredAt", DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)?.toDate()?.time ?: 0L,
+        notifiedStatus = getString("notifiedStatus")?.let { RegistrationStatus.parse(it) },
+    )
 }
 
 private fun DocumentSnapshot.toProject(): Project? {

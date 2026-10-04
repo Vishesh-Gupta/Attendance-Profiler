@@ -4,6 +4,7 @@ import com.example.android.htn.data.CheckIn
 import com.example.android.htn.data.CheckInMethod
 import com.example.android.htn.data.Event
 import com.example.android.htn.data.Registration
+import com.example.android.htn.data.RegistrationStatus
 import com.example.android.htn.data.Role
 import com.example.android.htn.data.UserProfile
 import org.junit.Assert.assertEquals
@@ -25,6 +26,7 @@ class AttendanceProfilerTest {
 
     private fun user(uid: String, role: Role = Role.PARTICIPANT) = UserProfile(uid, uid, "$uid@x.com", "", role)
     private fun checkIn(eventId: String, uid: String) = CheckIn(eventId, uid, 0, "vol", CheckInMethod.QR)
+    private fun approved(eventId: String, uid: String) = Registration(eventId, uid, RegistrationStatus.APPROVED)
 
     @Test
     fun noActivity_givesEmptyProfile() {
@@ -118,11 +120,24 @@ class AttendanceProfilerTest {
         val p = AttendanceProfiler.profile(
             "ada", events,
             listOf(checkIn("e1", "ada"), checkIn("e2", "bob")),
-            listOf(Registration("e2", "bob")),
+            listOf(approved("e2", "bob")),
             1_000,
         )
         assertEquals(1, p.eventsAttended)
         assertEquals(0, p.noShows)
+    }
+
+    @Test
+    fun onlyApprovedApplicationsCanBeNoShows() {
+        val registrations = listOf(
+            Registration("e3", "ada", RegistrationStatus.DECLINED),
+            Registration("e4", "ada", RegistrationStatus.WAITLISTED),
+            Registration("e5", "ada", RegistrationStatus.PENDING),
+        )
+        val p = AttendanceProfiler.profile("ada", events, emptyList(), registrations, 1_000)
+        assertEquals(0, p.noShows)
+        assertEquals(AttendanceTier.NONE, p.tier)
+        assertEquals(1, AttendanceProfiler.profile("ada", events, emptyList(), listOf(approved("e5", "ada")), 1_000).noShows)
     }
 
     @Test
@@ -143,7 +158,10 @@ class AttendanceProfilerTest {
             checkIn("e4", "cat"), // a later event doesn't make cat returning
             checkIn("e3", "cat"),
         )
-        val registrations = listOf(Registration("e3", "ada"), Registration("e3", "dan"), Registration("e4", "bob"))
+        val registrations = listOf(
+            approved("e3", "ada"), approved("e3", "dan"), approved("e4", "bob"),
+            Registration("e3", "eve", RegistrationStatus.PENDING), // not accepted: not expected, not counted
+        )
 
         val s = AttendanceProfiler.summarizeEvent(htn2024, events, users, checkIns, registrations)
 

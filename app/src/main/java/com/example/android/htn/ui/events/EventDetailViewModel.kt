@@ -9,6 +9,7 @@ import com.example.android.htn.data.CheckInResult
 import com.example.android.htn.data.Event
 import com.example.android.htn.data.Project
 import com.example.android.htn.data.QrPass
+import com.example.android.htn.data.RegistrationStatus
 import com.example.android.htn.data.UserProfile
 import com.example.android.htn.profiling.AttendanceProfiler
 import com.example.android.htn.profiling.EventSummary
@@ -29,7 +30,8 @@ data class Arrival(val user: UserProfile?, val checkIn: CheckIn)
 data class EventDetailState(
     val loading: Boolean = true,
     val event: Event? = null,
-    val registered: Boolean = false,
+    /** The signed-in person's application, or null if they haven't applied. */
+    val myStatus: RegistrationStatus? = null,
     val checkedIn: Boolean = false,
     /** Organizers only. */
     val summary: EventSummary? = null,
@@ -37,6 +39,8 @@ data class EventDetailState(
     val arrivals: List<Arrival> = emptyList(),
     /** Check-in staff only, for manual check-in. */
     val people: List<UserProfile> = emptyList(),
+    /** Check-in staff only: application status by uid, to see who can be checked in. */
+    val applications: Map<String, RegistrationStatus> = emptyMap(),
     /** The team the signed-in person is on for this event, if any. */
     val myTeam: Project? = null,
     /** Organizers: all projects. Judges: projects assigned to them. */
@@ -76,7 +80,7 @@ class EventDetailViewModel(
         EventDetailState(
             loading = false,
             event = event,
-            registered = registrations.any { it.eventId == eventId && it.userId == me.uid },
+            myStatus = registrations.firstOrNull { it.eventId == eventId && it.userId == me.uid }?.status,
             checkedIn = checkIns.any { it.eventId == eventId && it.userId == me.uid },
             summary = if (role.canSeeEveryone && event != null) {
                 AttendanceProfiler.summarizeEvent(event, events, usersById, checkIns, registrations)
@@ -87,6 +91,9 @@ class EventDetailViewModel(
                     .map { Arrival(usersById[it.userId], it) }
             } else emptyList(),
             people = if (role.canCheckIn) users else emptyList(),
+            applications = if (role.canCheckIn) {
+                registrations.filter { it.eventId == eventId }.associate { it.userId to it.status }
+            } else emptyMap(),
         )
     }
 
@@ -126,6 +133,20 @@ class EventDetailViewModel(
 
     fun dismissScan() {
         _lastScan.value = null
+    }
+
+    /** Organizers only: approves the application (which emails the person) and checks them in. */
+    fun approveAndCheckIn(user: UserProfile, method: CheckInMethod) = viewModelScope.launch {
+        _lastScan.value = try {
+            if (state.value.applications[user.uid] == null) {
+                repository.registerOnBehalf(eventId, user.uid, RegistrationStatus.APPROVED, me.uid)
+            } else {
+                repository.setRegistrationStatus(eventId, user.uid, RegistrationStatus.APPROVED, me.uid)
+            }
+            ScanOutcome.Done(repository.checkIn(eventId, user.uid, me.uid, method), method)
+        } catch (e: Exception) {
+            ScanOutcome.Failed(e.userMessage())
+        }
     }
 
     fun undoCheckIn(userId: String) = launchReporting { repository.undoCheckIn(eventId, userId) }

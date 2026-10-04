@@ -30,6 +30,7 @@ import com.example.android.htn.ui.auth.AuthScreen
 import com.example.android.htn.ui.auth.FirebaseSetupRequiredScreen
 import com.example.android.htn.ui.auth.ProfileSetupScreen
 import com.example.android.htn.ui.components.LoadingBox
+import com.example.android.htn.ui.events.ApplicationsScreen
 import com.example.android.htn.ui.events.EventDetailScreen
 import com.example.android.htn.ui.events.EventsScreen
 import com.example.android.htn.ui.people.PeopleScreen
@@ -130,6 +131,7 @@ private fun SignedInApp(me: UserProfile) {
                     onOpenProjects = { navController.navigate("events/$eventId/projects") },
                     onOpenTeam = { navController.navigate("events/$eventId/team") },
                     onOpenResults = { navController.navigate("events/$eventId/results") },
+                    onOpenApplications = { navController.navigate("events/$eventId/applications") },
                 )
             }
             composable("events/{eventId}/results") { entry ->
@@ -169,6 +171,9 @@ private fun SignedInApp(me: UserProfile) {
                 }
             }
             if (me.role.canSeeEveryone) {
+                composable("events/{eventId}/applications") { entry ->
+                    ApplicationsScreen(entry.arguments?.getString("eventId").orEmpty(), me, onBack = back, onOpenPerson = openPerson)
+                }
                 composable(Tab.PEOPLE.route) { PeopleScreen(onOpenPerson = openPerson) }
                 composable("people/{uid}") { entry ->
                     PersonScreen(

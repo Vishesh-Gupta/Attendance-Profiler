@@ -42,6 +42,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.android.htn.data.Event
 import com.example.android.htn.data.Project
+import com.example.android.htn.data.RegistrationStatus
 import com.example.android.htn.data.TeamCode
 import com.example.android.htn.data.UserProfile
 import com.example.android.htn.ui.components.BackTopBar
@@ -54,21 +55,17 @@ import com.example.android.htn.ui.userMessage
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 
-/** [attending]: registered or checked in, which is what it takes to create or join a team. */
-private data class TeamState(val event: Event?, val team: Project?, val attending: Boolean)
+/** [application]: the person's application status; only approved people can create or join teams. */
+private data class TeamState(val event: Event?, val team: Project?, val application: RegistrationStatus?)
 
 /** A participant's team for one event: create or join it, share its code, edit the project, or leave. */
 @Composable
 fun TeamScreen(eventId: String, me: UserProfile, onBack: () -> Unit) {
     val repository = rememberApp().repository
     val stateFlow = remember(eventId, me.uid) {
-        combine(
-            repository.event(eventId),
-            repository.teamOf(eventId, me.uid),
-            repository.checkInsOf(me.uid),
-            repository.registrationsOf(me.uid),
-        ) { e, t, checkIns, registrations ->
-            TeamState(e, t, checkIns.any { it.eventId == eventId } || registrations.any { it.eventId == eventId })
+        combine(repository.event(eventId), repository.teamOf(eventId, me.uid), repository.registrationsOf(me.uid)) {
+                e, t, registrations ->
+            TeamState(e, t, registrations.firstOrNull { it.eventId == eventId }?.status)
         }
     }
     val state by stateFlow.collectAsStateWithLifecycle(initialValue = null)
@@ -128,12 +125,16 @@ fun TeamScreen(eventId: String, me: UserProfile, onBack: () -> Unit) {
                     }
                 }
                 !open -> Text("Project submissions for this event are closed.")
-                !s.attending -> {
-                    Text("Register for this event to create or join a team. You can do this before check-in.")
-                    Button(onClick = { run("You're registered") { repository.register(eventId, me.uid) } }, enabled = !busy) {
-                        Text("Register")
+                s.application == null -> {
+                    Text("Apply to attend this event first. Once organizers approve you, you can create or join a team.")
+                    Button(onClick = { run("Application sent") { repository.register(eventId, me.uid) } }, enabled = !busy) {
+                        Text("Apply to attend")
                     }
                 }
+                s.application != RegistrationStatus.APPROVED -> Text(
+                    "Your application is ${s.application.label.lowercase()}. Only approved people can create or join " +
+                        "teams. You'll get an email when organizers decide."
+                )
                 else -> {
                     JoinTeamSection(eventId, busy, onError = { scope.launch { snackbar.showSnackbar(it) } }) { code ->
                         run("You joined the team") { repository.joinTeam(eventId, code, me) }
@@ -142,7 +143,7 @@ fun TeamScreen(eventId: String, me: UserProfile, onBack: () -> Unit) {
                     Text("Or start a new team", style = MaterialTheme.typography.titleMedium)
                     Text(
                         "You'll get a team code to share. Up to ${Project.MAX_TEAM_SIZE} people per team, " +
-                            "and each teammate needs to be registered for the event.",
+                            "and each teammate needs an approved application.",
                         style = MaterialTheme.typography.bodySmall,
                     )
                     ProjectForm(

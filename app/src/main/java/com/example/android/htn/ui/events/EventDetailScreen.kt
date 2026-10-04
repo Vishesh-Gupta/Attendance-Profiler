@@ -19,6 +19,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.HorizontalDivider
@@ -51,6 +52,7 @@ import androidx.lifecycle.viewmodel.viewModelFactory
 import com.example.android.htn.data.CheckInMethod
 import com.example.android.htn.data.CheckInResult
 import com.example.android.htn.data.Project
+import com.example.android.htn.data.RegistrationStatus
 import com.example.android.htn.data.Role
 import com.example.android.htn.data.UserProfile
 import com.example.android.htn.ui.components.BackTopBar
@@ -72,6 +74,7 @@ fun EventDetailScreen(
     onOpenProjects: () -> Unit,
     onOpenTeam: () -> Unit,
     onOpenResults: () -> Unit,
+    onOpenApplications: () -> Unit,
 ) {
     val repository = rememberApp().repository
     val vm: EventDetailViewModel = viewModel(
@@ -119,18 +122,21 @@ fun EventDetailScreen(
                     if (event.description.isNotBlank()) Text(event.description)
                     val eventOver = event.isOver(todayEpochDay())
                     MyStatusCard(
-                        registered = state.registered,
+                        status = state.myStatus,
                         checkedIn = state.checkedIn,
                         upcoming = !eventOver,
                         onSetRegistered = vm::setRegistered,
                     )
+                    if (me.role.canSeeEveryone) {
+                        ApplicationsCard(state.applications.values.groupingBy { it }.eachCount(), onOpenApplications)
+                    }
                     if (state.resultsPublished) {
                         Button(onClick = onOpenResults, modifier = Modifier.fillMaxWidth()) { Text("See results") }
                     }
                     if (me.role == Role.PARTICIPANT) {
                         TeamCard(
                             state.myTeam,
-                            attending = state.registered || state.checkedIn,
+                            approved = state.myStatus == RegistrationStatus.APPROVED,
                             eventOver = eventOver,
                             onOpen = onOpenTeam,
                         )
@@ -139,11 +145,17 @@ fun EventDetailScreen(
                         ProjectsCard(state.projectCount, me.role, onOpenProjects)
                     }
                     if (me.role.canCheckIn) {
-                        CheckInDesk(lastScan, onScan = scan, onDismiss = vm::dismissScan)
+                        CheckInDesk(
+                            lastScan,
+                            canApprove = me.role.canSeeEveryone,
+                            onScan = scan,
+                            onDismiss = vm::dismissScan,
+                            onApproveAndCheckIn = vm::approveAndCheckIn,
+                        )
                     }
                 }
             }
-            if (me.role.canCheckIn) manualCheckIn(state, vm)
+            if (me.role.canCheckIn) manualCheckIn(state, canApprove = me.role.canSeeEveryone, vm)
             if (me.role.canCheckIn) attendance(state, me, vm, onOpenPerson)
         }
     }
@@ -165,28 +177,79 @@ fun EventDetailScreen(
 }
 
 @Composable
-private fun MyStatusCard(registered: Boolean, checkedIn: Boolean, upcoming: Boolean, onSetRegistered: (Boolean) -> Unit) {
+private fun MyStatusCard(
+    status: RegistrationStatus?,
+    checkedIn: Boolean,
+    upcoming: Boolean,
+    onSetRegistered: (Boolean) -> Unit,
+) {
+    var confirmWithdraw by remember { mutableStateOf(false) }
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             when {
                 checkedIn -> Text("You're checked in.", style = MaterialTheme.typography.titleMedium)
-                registered && upcoming -> {
-                    Text("You're registered. Show your pass at check-in.", style = MaterialTheme.typography.titleMedium)
-                    OutlinedButton(onClick = { onSetRegistered(false) }) { Text("Cancel registration") }
+                !upcoming -> Text(
+                    if (status == RegistrationStatus.APPROVED) "You were approved but weren't checked in."
+                    else "You didn't attend this event."
+                )
+                status == null -> {
+                    Text("Want to attend? Apply, and organizers will email you once they've reviewed your application.")
+                    Button(onClick = { onSetRegistered(true) }) { Text("Apply to attend") }
                 }
-                upcoming -> {
-                    Text("Going? Register so organizers know to expect you.")
-                    Button(onClick = { onSetRegistered(true) }) { Text("Register") }
+                else -> {
+                    Text(
+                        when (status) {
+                            RegistrationStatus.PENDING -> "Application received"
+                            RegistrationStatus.APPROVED -> "You're approved!"
+                            RegistrationStatus.WAITLISTED -> "You're on the waitlist"
+                            RegistrationStatus.DECLINED -> "Application not accepted"
+                        },
+                        style = MaterialTheme.typography.titleMedium,
+                    )
+                    Text(
+                        when (status) {
+                            RegistrationStatus.PENDING -> "Organizers are reviewing applications. We'll email you with their decision."
+                            RegistrationStatus.APPROVED -> "Form your team below, and show your pass at check-in."
+                            RegistrationStatus.WAITLISTED -> "We'll email you if a spot opens up."
+                            RegistrationStatus.DECLINED -> "Unfortunately there isn't a spot for you at this event."
+                        }
+                    )
+                    if (status != RegistrationStatus.DECLINED) {
+                        OutlinedButton(onClick = { confirmWithdraw = true }) { Text("Withdraw application") }
+                    }
                 }
-                registered -> Text("You registered but weren't checked in.")
-                else -> Text("You didn't attend this event.")
+            }
+        }
+    }
+    if (confirmWithdraw) {
+        AlertDialog(
+            onDismissRequest = { confirmWithdraw = false },
+            title = { Text("Withdraw application?") },
+            text = { Text("If you apply again, you'll go back to the review queue.") },
+            confirmButton = {
+                TextButton(onClick = { confirmWithdraw = false; onSetRegistered(false) }) { Text("Withdraw") }
+            },
+            dismissButton = { TextButton(onClick = { confirmWithdraw = false }) { Text("Keep") } },
+        )
+    }
+}
+
+@Composable
+private fun ApplicationsCard(counts: Map<RegistrationStatus, Int>, onOpen: () -> Unit) {
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Applications", style = MaterialTheme.typography.titleMedium)
+            Text(RegistrationStatus.entries.joinToString(" · ") { "${counts[it] ?: 0} ${it.label.lowercase()}" })
+            Button(onClick = onOpen) {
+                val pending = counts[RegistrationStatus.PENDING] ?: 0
+                Text(if (pending > 0) "Review $pending pending" else "Review applications")
             }
         }
     }
 }
 
 @Composable
-private fun TeamCard(team: Project?, attending: Boolean, eventOver: Boolean, onOpen: () -> Unit) {
+private fun TeamCard(team: Project?, approved: Boolean, eventOver: Boolean, onOpen: () -> Unit) {
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("Your team", style = MaterialTheme.typography.titleMedium)
@@ -197,7 +260,7 @@ private fun TeamCard(team: Project?, attending: Boolean, eventOver: Boolean, onO
                     OutlinedButton(onClick = onOpen) { Text(if (eventOver) "View project" else "Manage, edit or switch team") }
                 }
                 eventOver -> Text("You didn't submit a project for this event.")
-                !attending -> Text("Register above to start a team project or join your teammates' (no need to wait for check-in).")
+                !approved -> Text("Once your application is approved, you can start a team project or join your teammates'. No need to wait for check-in.")
                 else -> {
                     Text("Start a team project, or join your teammates with their team code.")
                     Button(onClick = onOpen) { Text("Create or join a team") }
@@ -221,10 +284,16 @@ private fun ProjectsCard(count: Int, role: Role, onOpen: () -> Unit) {
 }
 
 @Composable
-private fun CheckInDesk(lastScan: ScanOutcome?, onScan: () -> Unit, onDismiss: () -> Unit) {
+private fun CheckInDesk(
+    lastScan: ScanOutcome?,
+    canApprove: Boolean,
+    onScan: () -> Unit,
+    onDismiss: () -> Unit,
+    onApproveAndCheckIn: (UserProfile, CheckInMethod) -> Unit,
+) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("Check-in desk", style = MaterialTheme.typography.titleMedium)
-        lastScan?.let { ScanResultCard(it, onDismiss) }
+        lastScan?.let { ScanResultCard(it, canApprove, onDismiss, onApproveAndCheckIn) }
         Button(onClick = onScan, modifier = Modifier.fillMaxWidth()) {
             Text(if (lastScan == null) "Scan QR pass" else "Scan next")
         }
@@ -232,11 +301,25 @@ private fun CheckInDesk(lastScan: ScanOutcome?, onScan: () -> Unit, onDismiss: (
 }
 
 @Composable
-private fun ScanResultCard(outcome: ScanOutcome, onDismiss: () -> Unit) {
+private fun ScanResultCard(
+    outcome: ScanOutcome,
+    canApprove: Boolean,
+    onDismiss: () -> Unit,
+    onApproveAndCheckIn: (UserProfile, CheckInMethod) -> Unit,
+) {
+    val notApproved = (outcome as? ScanOutcome.Done)?.let { done ->
+        (done.result as? CheckInResult.NotApproved)?.let { it to done.method }
+    }
     val (color, title, detail) = when (outcome) {
         is ScanOutcome.Done -> when (val r = outcome.result) {
             is CheckInResult.CheckedIn -> Triple(Color(0xFF2E7D32), "Checked in: ${r.user.name}", r.user.role.label)
             is CheckInResult.AlreadyCheckedIn -> Triple(Color(0xFFF9A825), "Already checked in: ${r.user.name}", r.user.role.label)
+            is CheckInResult.NotApproved -> Triple(
+                Color(0xFFC62828),
+                "Not approved: ${r.user.name}",
+                (r.status?.let { "Application: ${it.label.lowercase()}." } ?: "They never applied.") +
+                    if (canApprove) "" else " Ask an organizer.",
+            )
             CheckInResult.UnknownUser -> Triple(Color(0xFFC62828), "Unknown person", "This pass doesn't match any account.")
         }
         ScanOutcome.NotAPass -> Triple(Color(0xFFC62828), "Not a check-in pass", "Ask them to open My pass in the app.")
@@ -247,16 +330,23 @@ private fun ScanResultCard(outcome: ScanOutcome, onDismiss: () -> Unit) {
         colors = CardDefaults.cardColors(containerColor = color, contentColor = Color.White),
     ) {
         Row(Modifier.padding(16.dp)) {
-            Column(Modifier.weight(1f)) {
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(title, style = MaterialTheme.typography.titleLarge)
                 Text(detail)
+                if (canApprove && notApproved != null) {
+                    val (result, method) = notApproved
+                    Button(
+                        onClick = { onApproveAndCheckIn(result.user, method) },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Color(0xFFC62828)),
+                    ) { Text("Approve & check in") }
+                }
             }
             IconButton(onClick = onDismiss) { Icon(Icons.Filled.Clear, contentDescription = "Dismiss") }
         }
     }
 }
 
-private fun LazyListScope.manualCheckIn(state: EventDetailState, vm: EventDetailViewModel) {
+private fun LazyListScope.manualCheckIn(state: EventDetailState, canApprove: Boolean, vm: EventDetailViewModel) {
     item {
         var query by rememberSaveable { mutableStateOf("") }
         val checkedInIds = state.arrivals.map { it.checkIn.userId }.toSet()
@@ -274,14 +364,25 @@ private fun LazyListScope.manualCheckIn(state: EventDetailState, vm: EventDetail
                 label = { Text("No pass? Search by name or email") },
             )
             matches.forEach { person ->
+                val application = state.applications[person.uid]
+                val needsApproval = person.role == Role.PARTICIPANT && application != RegistrationStatus.APPROVED
                 ListItem(
                     headlineContent = { Text(person.name) },
-                    supportingContent = { Text("${person.email} · ${person.role.label}") },
+                    supportingContent = {
+                        Text(
+                            "${person.email} · ${person.role.label}" +
+                                if (person.role == Role.PARTICIPANT) " · ${application?.label ?: "Didn't apply"}" else ""
+                        )
+                    },
                     trailingContent = {
-                        if (person.uid in checkedInIds) {
-                            Icon(Icons.Filled.Check, contentDescription = "Already checked in")
-                        } else {
-                            Button(onClick = {
+                        when {
+                            person.uid in checkedInIds -> Icon(Icons.Filled.Check, contentDescription = "Already checked in")
+                            needsApproval && canApprove -> Button(onClick = {
+                                vm.approveAndCheckIn(person, CheckInMethod.MANUAL)
+                                query = ""
+                            }) { Text("Approve & check in") }
+                            needsApproval -> Text("Not approved", color = MaterialTheme.colorScheme.error)
+                            else -> Button(onClick = {
                                 vm.checkIn(person.uid, CheckInMethod.MANUAL)
                                 query = ""
                             }) { Text("Check in") }
@@ -313,13 +414,13 @@ private fun LazyListScope.attendance(
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 StatCard("Checked in", "${summary.checkedIn}", Modifier.weight(1f))
-                StatCard("Registered", "${summary.registered}", Modifier.weight(1f))
+                StatCard("Approved", "${summary.registered}", Modifier.weight(1f))
                 StatCard("Not arrived", "${summary.notYetArrived}", Modifier.weight(1f))
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 StatCard("First-timers", "${summary.firstTimers}", Modifier.weight(1f))
                 StatCard("Returning", "${summary.returning}", Modifier.weight(1f))
-                StatCard("Walk-ins", "${summary.walkIns}", Modifier.weight(1f))
+                StatCard("Staff in", "${summary.walkIns}", Modifier.weight(1f))
             }
             if (summary.byRole.isNotEmpty()) {
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
