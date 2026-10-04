@@ -187,7 +187,10 @@ class AttendanceRepository(private val db: FirebaseFirestore) {
             .flatMapLatest { projectId -> if (projectId == null) flowOf(null) else project(eventId, projectId) }
             .logErrors(null)
 
-    /** Starts a team project with [me] as its first member. Returns the team code. */
+    /**
+     * Starts a team project with [me] as its first member. Returns the team code. [me] must be
+     * registered or checked in and not on another team for this event.
+     */
     suspend fun createProject(eventId: String, me: UserProfile, title: String, description: String, link: String): String {
         val code = TeamCode.generate()
         db.batch().apply {
@@ -222,8 +225,9 @@ class AttendanceRepository(private val db: FirebaseFirestore) {
     }
 
     /**
-     * Adds [me] to the team with [code]. People can't read a team before joining it, so the reasons
-     * a join is refused are reported together.
+     * Adds [me] to the team with [code]. [me] must be registered or checked in, and must have left any
+     * other team for this event first. People can't read a team before joining it, so the reasons a
+     * join is refused are reported together.
      */
     suspend fun joinTeam(eventId: String, code: String, me: UserProfile) {
         try {
@@ -240,8 +244,8 @@ class AttendanceRepository(private val db: FirebaseFirestore) {
                 when (e.code) {
                     FirebaseFirestoreException.Code.NOT_FOUND -> "No team has that code for this event."
                     FirebaseFirestoreException.Code.PERMISSION_DENIED ->
-                        "Couldn't join. The team may be full (max ${Project.MAX_TEAM_SIZE}), you may already be on " +
-                            "a team, or you aren't checked in yet."
+                        "Couldn't join. The team may be full (max ${Project.MAX_TEAM_SIZE}), you may still be on " +
+                            "another team (leave it first), or you haven't registered for this event."
                     else -> e.localizedMessage ?: "Couldn't join the team."
                 },
                 e,

@@ -15,7 +15,7 @@ data that's meant for it.
 |---|:-:|:-:|:-:|:-:|
 | Tabs | Profile, Events, My projects | Profile, Events, Judging | Profile, Events | Profile, Events, People, Projects |
 | Own profile, QR pass, own attendance, event calendar, register for events | ✓ | ✓ | ✓ | ✓ |
-| Create or join a team project at an event they're checked in to | ✓ | | | |
+| Create, join or switch team projects at events they've registered for | ✓ | | | |
 | See published results; teams see their own scores and notes | ✓ | ✓ | ✓ | ✓ |
 | See and score the projects assigned to them (only their own scores) | | ✓ | | |
 | Check people in (QR or manual), see arrivals | | | ✓ | ✓ |
@@ -42,15 +42,16 @@ Everyone signs up as a **participant**. Organizers promote people from the perso
 - **QR check-in desk** (volunteers and organizers): scan someone's pass, or search for them by name
   if they don't have their phone. A large green, amber or red card shows the result. Each person can
   only check in once per event.
-- **Teams**: everyone registers and checks in with their own account, then builds a project
-  together. One teammate creates the team project and gets a **team code** (like `ABCDE-FGHJK`)
-  with a QR code and a Share button. Teammates join by scanning that QR code or typing the code.
-  Rules:
+- **Teams**: everyone registers with their own account, then builds a project together. Teams can
+  form as soon as people register; nobody has to wait for check-in. One teammate creates the team
+  project and gets a **team code** (like `ABCDE-FGHJK`) with a QR code and a Share button.
+  Teammates join by scanning that QR code or typing the code. Rules:
   - Teams have at most 4 members.
-  - Each person can be on only one team per event.
-  - Everyone on a team must be checked in.
-  - Any member can edit the project until the event ends; members can leave, and the last one out
-    deletes the project.
+  - You must be registered (or checked in as a walk-in) to create or join a team.
+  - Each person can be on only one team per event. To switch, leave your current team first, then
+    join or start another.
+  - Any member can edit the project until the event ends. The last member to leave deletes the
+    project.
 - **Judge assignment** (organizers): *Auto-assign judges* gives every project the chosen number of
   judges and balances the load across judges, keeping any existing assignments. Organizers can also
   assign or unassign judges by hand on each project. Judges only see and score the projects
