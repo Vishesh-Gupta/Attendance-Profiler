@@ -1,112 +1,149 @@
 package com.example.android.htn.profiling
 
-import com.example.android.htn.data.AttendanceRepository
-import com.example.android.htn.data.Attendee
-import com.example.android.htn.data.AttendeeRole
 import com.example.android.htn.data.CheckIn
+import com.example.android.htn.data.CheckInMethod
 import com.example.android.htn.data.Event
+import com.example.android.htn.data.Registration
+import com.example.android.htn.data.Role
+import com.example.android.htn.data.UserProfile
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AttendanceProfilerTest {
 
-    private val htn2022 = Event(id = 1, name = "HTN 2022", location = "Waterloo", startEpochDay = 100)
-    private val htn2023 = Event(id = 2, name = "HTN 2023", location = "Waterloo", startEpochDay = 200)
-    private val htn2024 = Event(id = 3, name = "HTN 2024", location = "Waterloo", startEpochDay = 300)
-    private val htn2025 = Event(id = 4, name = "HTN 2025", location = "Waterloo", startEpochDay = 400)
-    private val htn2026 = Event(id = 5, name = "HTN 2026", location = "Waterloo", startEpochDay = 500)
+    private val htn2022 = Event(id = "e1", name = "HTN 2022", location = "Waterloo", startEpochDay = 100)
+    private val htn2023 = Event(id = "e2", name = "HTN 2023", location = "Waterloo", startEpochDay = 200)
+    private val htn2024 = Event(id = "e3", name = "HTN 2024", location = "Waterloo", startEpochDay = 300)
+    private val htn2025 = Event(id = "e4", name = "HTN 2025", location = "Waterloo", startEpochDay = 400)
+    private val htn2026 = Event(id = "e5", name = "HTN 2026", location = "Waterloo", startEpochDay = 500)
     private val events = listOf(htn2025, htn2022, htn2026, htn2024, htn2023) // deliberately unsorted
 
-    private fun attendee(id: Long, role: AttendeeRole = AttendeeRole.HACKER) =
-        Attendee(id = id, name = "A$id", email = "a$id@example.com", organization = "", role = role, createdAt = 0)
+    private fun profile(attended: Set<String>, registered: Set<String> = emptySet(), today: Long = 1_000) =
+        AttendanceProfiler.profile(events, attended, registered, today)
+
+    private fun user(uid: String, role: Role = Role.PARTICIPANT) = UserProfile(uid, uid, "$uid@x.com", "", role)
+    private fun checkIn(eventId: String, uid: String) = CheckIn(eventId, uid, 0, "vol", CheckInMethod.QR)
 
     @Test
-    fun noCheckIns_givesEmptyProfile() {
-        val profile = AttendanceProfiler.profile(events, emptySet(), todayEpochDay = 1_000)
-        assertEquals(0, profile.eventsAttended)
-        assertEquals(AttendanceTier.NONE, profile.tier)
-        assertNull(profile.firstSeen)
-        assertTrue(profile.timeline.isEmpty())
+    fun noActivity_givesEmptyProfile() {
+        val p = profile(emptySet())
+        assertEquals(0, p.eventsAttended)
+        assertEquals(AttendanceTier.NONE, p.tier)
+        assertNull(p.firstSeen)
+        assertTrue(p.timeline.isEmpty())
     }
 
     @Test
-    fun eventsBeforeFirstCheckIn_doNotCountAgainstRate() {
-        val profile = AttendanceProfiler.profile(events, setOf(3L, 5L), todayEpochDay = 1_000)
-        assertEquals(2, profile.eventsAttended)
-        assertEquals(3, profile.eligibleEvents) // 2024, 2025, 2026
-        assertEquals(2.0 / 3, profile.attendanceRate, 1e-9)
-        assertEquals(htn2024, profile.firstSeen)
-        assertEquals(htn2026, profile.lastSeen)
+    fun eventsBeforeFirstEngagement_doNotCountAgainstRate() {
+        val p = profile(setOf("e3", "e5"))
+        assertEquals(2, p.eventsAttended)
+        assertEquals(3, p.eligibleEvents) // 2024, 2025, 2026
+        assertEquals(2.0 / 3, p.attendanceRate, 1e-9)
+        assertEquals(htn2024, p.firstSeen)
+        assertEquals(htn2026, p.lastSeen)
     }
 
     @Test
     fun streaks() {
         // attended 2022, 2023, 2024, missed 2025, attended 2026
-        val profile = AttendanceProfiler.profile(events, setOf(1L, 2L, 3L, 5L), todayEpochDay = 1_000)
-        assertEquals(3, profile.longestStreak)
-        assertEquals(1, profile.currentStreak)
-        assertEquals(AttendanceTier.VETERAN, profile.tier)
+        val p = profile(setOf("e1", "e2", "e3", "e5"))
+        assertEquals(3, p.longestStreak)
+        assertEquals(1, p.currentStreak)
+        assertEquals(AttendanceTier.VETERAN, p.tier)
     }
 
     @Test
     fun missingMostRecentEvent_breaksCurrentStreak() {
-        val profile = AttendanceProfiler.profile(events, setOf(3L, 4L), todayEpochDay = 1_000)
-        assertEquals(0, profile.currentStreak)
-        assertEquals(2, profile.longestStreak)
+        val p = profile(setOf("e3", "e4"))
+        assertEquals(0, p.currentStreak)
+        assertEquals(2, p.longestStreak)
+    }
+
+    @Test
+    fun noShows_countRegisteredPastEventsWithoutCheckIn() {
+        val p = profile(attended = setOf("e3"), registered = setOf("e2", "e3", "e4"))
+        assertEquals(2, p.noShows)
+        // First engagement is the 2023 registration, so 2023 through 2026 are eligible.
+        assertEquals(4, p.eligibleEvents)
+        assertEquals(
+            listOf(TimelineStatus.MISSED, TimelineStatus.NO_SHOW, TimelineStatus.ATTENDED, TimelineStatus.NO_SHOW),
+            p.timeline.map { it.status },
+        )
+    }
+
+    @Test
+    fun onlyNoShows_stillProducesAProfile() {
+        val p = profile(attended = emptySet(), registered = setOf("e4"))
+        assertEquals(1, p.noShows)
+        assertEquals(0.0, p.attendanceRate, 1e-9)
+        assertEquals(AttendanceTier.NONE, p.tier)
+        assertNull(p.firstSeen)
+    }
+
+    @Test
+    fun registrationForTodayOrLater_isNotANoShowYet() {
+        val p = profile(attended = setOf("e3"), registered = setOf("e4", "e5"), today = 400)
+        assertEquals(0, p.noShows)
+        assertEquals(1, p.eligibleEvents)
+        assertEquals(1, p.currentStreak)
     }
 
     @Test
     fun futureEvents_areIgnoredUntilAttended() {
-        val profile = AttendanceProfiler.profile(events, setOf(3L, 4L), todayEpochDay = 450)
-        assertEquals(2, profile.eligibleEvents)
-        assertEquals(1.0, profile.attendanceRate, 1e-9)
-        assertEquals(2, profile.currentStreak)
+        val p = profile(setOf("e3", "e4"), today = 450)
+        assertEquals(2, p.eligibleEvents)
+        assertEquals(1.0, p.attendanceRate, 1e-9)
+        assertEquals(2, p.currentStreak)
     }
 
     @Test
     fun timeline_isMostRecentFirst() {
-        val profile = AttendanceProfiler.profile(events, setOf(2L, 4L), todayEpochDay = 1_000)
-        assertEquals(listOf(htn2026, htn2025, htn2024, htn2023), profile.timeline.map { it.event })
-        assertEquals(listOf(false, true, false, true), profile.timeline.map { it.attended })
+        val p = profile(setOf("e2", "e4"))
+        assertEquals(listOf(htn2026, htn2025, htn2024, htn2023), p.timeline.map { it.event })
+    }
+
+    @Test
+    fun profileByUserId_filtersOtherPeoplesActivity() {
+        val p = AttendanceProfiler.profile(
+            "ada", events,
+            listOf(checkIn("e1", "ada"), checkIn("e2", "bob")),
+            listOf(Registration("e2", "bob")),
+            1_000,
+        )
+        assertEquals(1, p.eventsAttended)
+        assertEquals(0, p.noShows)
     }
 
     @Test
     fun tierThresholds() {
         assertEquals(AttendanceTier.NONE, AttendanceProfiler.tierFor(0))
         assertEquals(AttendanceTier.FIRST_TIMER, AttendanceProfiler.tierFor(1))
-        assertEquals(AttendanceTier.RETURNING, AttendanceProfiler.tierFor(2))
         assertEquals(AttendanceTier.RETURNING, AttendanceProfiler.tierFor(3))
         assertEquals(AttendanceTier.VETERAN, AttendanceProfiler.tierFor(4))
     }
 
     @Test
-    fun eventSummary_splitsFirstTimersFromReturning() {
-        val alice = attendee(1)
-        val bob = attendee(2, AttendeeRole.MENTOR)
-        val carol = attendee(3)
+    fun eventSummary() {
+        val users = listOf(user("ada"), user("bob", Role.JUDGE), user("cat"), user("dan")).associateBy { it.uid }
         val checkIns = listOf(
-            CheckIn(eventId = 2, attendeeId = 1, checkedInAt = 0), // alice came in 2023
-            CheckIn(eventId = 3, attendeeId = 1, checkedInAt = 0),
-            CheckIn(eventId = 3, attendeeId = 2, checkedInAt = 0),
-            CheckIn(eventId = 4, attendeeId = 3, checkedInAt = 0), // later event doesn't make carol returning
-            CheckIn(eventId = 3, attendeeId = 3, checkedInAt = 0),
+            checkIn("e2", "ada"), // ada came in 2023, so she's returning in 2024
+            checkIn("e3", "ada"),
+            checkIn("e3", "bob"),
+            checkIn("e4", "cat"), // a later event doesn't make cat returning
+            checkIn("e3", "cat"),
         )
-        val summary = AttendanceProfiler.summarizeEvent(htn2024, events, listOf(alice, bob, carol), checkIns)
-        assertEquals(3, summary.checkedIn)
-        assertEquals(1, summary.returning)
-        assertEquals(2, summary.firstTimers)
-        assertEquals(mapOf(AttendeeRole.HACKER to 2, AttendeeRole.MENTOR to 1), summary.byRole)
-    }
+        val registrations = listOf(Registration("e3", "ada"), Registration("e3", "dan"), Registration("e4", "bob"))
 
-    @Test
-    fun emailValidationAndNormalization() {
-        assertTrue(AttendanceRepository.isValidEmail("hacker@uwaterloo.ca"))
-        assertTrue(AttendanceRepository.isValidEmail("  first.last+htn@gmail.com "))
-        assertFalse(AttendanceRepository.isValidEmail("not-an-email"))
-        assertFalse(AttendanceRepository.isValidEmail("a@b"))
-        assertEquals("hacker@uwaterloo.ca", AttendanceRepository.normalizeEmail(" Hacker@UWaterloo.ca "))
+        val s = AttendanceProfiler.summarizeEvent(htn2024, events, users, checkIns, registrations)
+
+        assertEquals(3, s.checkedIn)
+        assertEquals(2, s.registered)
+        assertEquals(1, s.returning)
+        assertEquals(2, s.firstTimers)
+        assertEquals(2, s.walkIns) // bob and cat didn't register
+        assertEquals(1, s.notYetArrived) // dan
+        assertEquals(mapOf(Role.PARTICIPANT to 2, Role.JUDGE to 1), s.byRole)
     }
 }
