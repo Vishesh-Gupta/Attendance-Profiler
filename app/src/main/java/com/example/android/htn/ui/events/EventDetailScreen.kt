@@ -70,7 +70,8 @@ fun EventDetailScreen(
     onBack: () -> Unit,
     onOpenPerson: (String) -> Unit,
     onOpenProjects: () -> Unit,
-    onEditProject: () -> Unit,
+    onOpenTeam: () -> Unit,
+    onOpenResults: () -> Unit,
 ) {
     val repository = rememberApp().repository
     val vm: EventDetailViewModel = viewModel(
@@ -123,10 +124,13 @@ fun EventDetailScreen(
                         upcoming = !eventOver,
                         onSetRegistered = vm::setRegistered,
                     )
-                    if (me.role == Role.PARTICIPANT && (state.myProject != null || (state.checkedIn && !eventOver))) {
-                        MyProjectCard(state.myProject, editable = !eventOver, onEdit = onEditProject)
+                    if (state.resultsPublished) {
+                        Button(onClick = onOpenResults, modifier = Modifier.fillMaxWidth()) { Text("See results") }
                     }
-                    if (me.role.canSeeAllProjects) {
+                    if (me.role == Role.PARTICIPANT) {
+                        TeamCard(state.myTeam, checkedIn = state.checkedIn, eventOver = eventOver, onOpen = onOpenTeam)
+                    }
+                    if (me.role.canSeeEveryone || me.role.canJudge) {
                         ProjectsCard(state.projectCount, me.role, onOpenProjects)
                     }
                     if (me.role.canCheckIn) {
@@ -177,16 +181,22 @@ private fun MyStatusCard(registered: Boolean, checkedIn: Boolean, upcoming: Bool
 }
 
 @Composable
-private fun MyProjectCard(project: Project?, editable: Boolean, onEdit: () -> Unit) {
+private fun TeamCard(team: Project?, checkedIn: Boolean, eventOver: Boolean, onOpen: () -> Unit) {
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("Your project", style = MaterialTheme.typography.titleMedium)
-            if (project == null) {
-                Text("Submit what you built so judges can review it.")
-                Button(onClick = onEdit) { Text("Submit project") }
-            } else {
-                Text(project.title, style = MaterialTheme.typography.bodyLarge)
-                OutlinedButton(onClick = onEdit) { Text(if (editable) "View or edit" else "View") }
+            Text("Your team", style = MaterialTheme.typography.titleMedium)
+            when {
+                team != null -> {
+                    Text(team.title, style = MaterialTheme.typography.bodyLarge)
+                    Text(team.teamLabel, style = MaterialTheme.typography.bodySmall)
+                    OutlinedButton(onClick = onOpen) { Text(if (eventOver) "View project" else "Manage team & project") }
+                }
+                eventOver -> Text("You didn't submit a project for this event.")
+                !checkedIn -> Text("Once you're checked in, start a team project or join your teammates'.")
+                else -> {
+                    Text("Start a team project, or join your teammates with their team code.")
+                    Button(onClick = onOpen) { Text("Create or join a team") }
+                }
             }
         }
     }
@@ -197,9 +207,9 @@ private fun ProjectsCard(count: Int, role: Role, onOpen: () -> Unit) {
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("Projects", style = MaterialTheme.typography.titleMedium)
-            Text("$count submitted")
+            Text(if (role.canJudge) "$count assigned to you" else "$count submitted")
             Button(onClick = onOpen, enabled = count > 0) {
-                Text(if (role.canJudge) "Judge projects" else "Leaderboard & scores")
+                Text(if (role.canJudge) "Judge projects" else "Judges, leaderboard & results")
             }
         }
     }

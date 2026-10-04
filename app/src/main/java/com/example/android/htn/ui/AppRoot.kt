@@ -37,7 +37,8 @@ import com.example.android.htn.ui.people.PersonScreen
 import com.example.android.htn.ui.profile.ProfileScreen
 import com.example.android.htn.ui.projects.EventProjectsScreen
 import com.example.android.htn.ui.projects.ProjectDetailScreen
-import com.example.android.htn.ui.projects.ProjectEditScreen
+import com.example.android.htn.ui.projects.ResultsScreen
+import com.example.android.htn.ui.projects.TeamScreen
 import com.example.android.htn.ui.projects.ProjectsTab
 
 @Composable
@@ -127,12 +128,16 @@ private fun SignedInApp(me: UserProfile) {
                     onBack = back,
                     onOpenPerson = { if (me.role.canSeeEveryone) openPerson(it) },
                     onOpenProjects = { navController.navigate("events/$eventId/projects") },
-                    onEditProject = { navController.navigate("events/$eventId/submit") },
+                    onOpenTeam = { navController.navigate("events/$eventId/team") },
+                    onOpenResults = { navController.navigate("events/$eventId/results") },
                 )
             }
+            composable("events/{eventId}/results") { entry ->
+                ResultsScreen(entry.arguments?.getString("eventId").orEmpty(), me, onBack = back)
+            }
             if (me.role == Role.PARTICIPANT) {
-                composable("events/{eventId}/submit") { entry ->
-                    ProjectEditScreen(entry.arguments?.getString("eventId").orEmpty(), me, onBack = back)
+                composable("events/{eventId}/team") { entry ->
+                    TeamScreen(entry.arguments?.getString("eventId").orEmpty(), me, onBack = back)
                 }
             }
             if (Tab.PROJECTS.route in tabRoutes) {
@@ -140,14 +145,19 @@ private fun SignedInApp(me: UserProfile) {
                     ProjectsTab(
                         me,
                         onOpenEventProjects = { navController.navigate("events/$it/projects") },
-                        onOpenOwnProject = { navController.navigate("events/$it/submit") },
+                        onOpenTeam = { navController.navigate("events/$it/team") },
                     )
                 }
             }
-            if (me.role.canSeeAllProjects) {
+            if (me.role.canJudge || me.role.canSeeEveryone) {
                 composable("events/{eventId}/projects") { entry ->
                     val eventId = entry.arguments?.getString("eventId").orEmpty()
-                    EventProjectsScreen(eventId, me, onBack = back, onOpenProject = { openProject(eventId, it) })
+                    EventProjectsScreen(
+                        eventId, me,
+                        onBack = back,
+                        onOpenProject = { openProject(eventId, it) },
+                        onOpenResults = { navController.navigate("events/$eventId/results") },
+                    )
                 }
                 composable("events/{eventId}/projects/{projectId}") { entry ->
                     ProjectDetailScreen(

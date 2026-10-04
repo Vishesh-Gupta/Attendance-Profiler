@@ -14,6 +14,10 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DatePickerDialog
+import androidx.compose.material3.DateRangePicker
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.rememberDateRangePickerState
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
@@ -55,7 +59,9 @@ import kotlinx.coroutines.launch
 import java.time.LocalDate
 import java.time.YearMonth
 import java.time.format.DateTimeFormatter
-import java.time.format.DateTimeParseException
+import java.time.Instant
+import java.time.ZoneOffset
+import java.time.format.FormatStyle
 
 private data class EventRow(val event: Event, val status: String?, val checkedInCount: Int?)
 
@@ -213,8 +219,9 @@ private fun LazyListScope.eventRows(rows: List<EventRow>, onOpenEvent: (String) 
     }
 }
 
-private fun parseDate(text: String): LocalDate? =
-    try { LocalDate.parse(text.trim()) } catch (e: DateTimeParseException) { null }
+private fun LocalDate.toUtcMillis(): Long = atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli()
+
+private fun Long.utcMillisToDate(): LocalDate = Instant.ofEpochMilli(this).atZone(ZoneOffset.UTC).toLocalDate()
 
 @Composable
 private fun CreateEventDialog(
@@ -225,12 +232,10 @@ private fun CreateEventDialog(
     var name by remember { mutableStateOf("") }
     var location by remember { mutableStateOf("") }
     var description by remember { mutableStateOf("") }
-    var start by remember { mutableStateOf(initialDate.toString()) }
-    var end by remember { mutableStateOf(initialDate.toString()) }
-    val startDate = parseDate(start)
-    val endDate = parseDate(end)
-    val rangeValid = startDate != null && endDate != null && !endDate.isBefore(startDate) &&
-        endDate.toEpochDay() - startDate.toEpochDay() <= 31
+    var start by remember { mutableStateOf(initialDate) }
+    var end by remember { mutableStateOf(initialDate) }
+    var pickingDates by remember { mutableStateOf(false) }
+    val fmt = remember { DateTimeFormatter.ofLocalizedDate(FormatStyle.MEDIUM) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -239,22 +244,76 @@ private fun CreateEventDialog(
             Column(Modifier.verticalScroll(rememberScrollState())) {
                 OutlinedTextField(name, { name = it }, label = { Text("Name") }, singleLine = true)
                 OutlinedTextField(location, { location = it }, label = { Text("Location") }, singleLine = true)
-                OutlinedTextField(start, { start = it }, label = { Text("Starts (YYYY-MM-DD)") }, singleLine = true,
-                    isError = startDate == null)
-                OutlinedTextField(end, { end = it }, label = { Text("Ends (YYYY-MM-DD)") }, singleLine = true,
-                    isError = startDate != null && !rangeValid,
-                    supportingText = { Text("Same as start for a one-day event; at most 31 days") })
+                OutlinedButton(onClick = { pickingDates = true }, modifier = Modifier.padding(vertical = 8.dp)) {
+                    Text(if (start == end) start.format(fmt) else "${start.format(fmt)} – ${end.format(fmt)}")
+                }
                 OutlinedTextField(description, { description = it }, label = { Text("Description (optional)") },
                     minLines = 2)
             }
         },
         confirmButton = {
             TextButton(
-                enabled = name.isNotBlank() && name.length <= 100 && location.length <= 100 &&
-                    description.length <= 2000 && rangeValid,
-                onClick = { onCreate(name, location, description, startDate!!.toEpochDay(), endDate!!.toEpochDay()) },
+                enabled = name.isNotBlank() && name.length <= 100 && location.length <= 100 && description.length <= 2000,
+                onClick = { onCreate(name, location, description, start.toEpochDay(), end.toEpochDay()) },
             ) { Text("Create") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
+
+    if (pickingDates) {
+        EventDatesPicker(
+            start = start,
+            end = end,
+            onDismiss = { pickingDates = false },
+            onPicked = { s, e ->
+                start = s
+                end = e
+                pickingDates = false
+            },
+        )
+    }
 }
+
+/** Pick one day (tap once) or a range (tap start, then end) of at most [MAX_EVENT_DAYS] days. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun EventDatesPicker(start: LocalDate, end: LocalDate, onDismiss: () -> Unit, onPicked: (LocalDate, LocalDate) -> Unit) {
+    val state = rememberDateRangePickerState(
+        initialSelectedStartDateMillis = start.toUtcMillis(),
+        initialSelectedEndDateMillis = end.toUtcMillis(),
+        initialDisplayedMonthMillis = start.toUtcMillis(),
+    )
+    val pickedStart = state.selectedStartDateMillis?.utcMillisToDate()
+    val pickedEnd = state.selectedEndDateMillis?.utcMillisToDate() ?: pickedStart
+    val tooLong = pickedStart != null && pickedEnd != null && pickedEnd.toEpochDay() - pickedStart.toEpochDay() > MAX_EVENT_DAYS
+
+    DatePickerDialog(
+        onDismissRequest = onDismiss,
+        confirmButton = {
+            TextButton(
+                enabled = pickedStart != null && !tooLong,
+                onClick = { onPicked(pickedStart!!, pickedEnd!!) },
+            ) { Text("OK") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    ) {
+        DateRangePicker(
+            state = state,
+            title = { Text("Event dates", Modifier.padding(start = 24.dp, top = 16.dp)) },
+            headline = {
+                Text(
+                    if (tooLong) "Events can last at most ${MAX_EVENT_DAYS + 1} days"
+                    else "Tap the first day, then the last (or just one day)",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = if (tooLong) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 24.dp, end = 12.dp, bottom = 12.dp),
+                )
+            },
+            showModeToggle = false,
+            modifier = Modifier.weight(1f),
+        )
+    }
+}
+
+/** Keep in sync with firebase/firestore.rules (endEpochDay - startEpochDay <= 31). */
+private const val MAX_EVENT_DAYS = 31

@@ -11,9 +11,8 @@ enum class Role(val label: String) {
     /** Only organizers see everyone's profiles, attendance stats and all scores. */
     val canSeeEveryone: Boolean get() = this == ORGANIZER
     val canManageEvents: Boolean get() = this == ORGANIZER
+    /** Judges score the projects organizers assign to them. */
     val canJudge: Boolean get() = this == JUDGE
-    /** Judges and organizers see every project submission. */
-    val canSeeAllProjects: Boolean get() = this == JUDGE || this == ORGANIZER
 
     companion object {
         fun parse(value: String?): Role = entries.firstOrNull { it.name == value } ?: PARTICIPANT
@@ -62,17 +61,31 @@ sealed interface CheckInResult {
     data object UnknownUser : CheckInResult
 }
 
-/** Stored at events/{eventId}/projects/{submittedBy}: one project per person per event. */
+data class TeamMember(val uid: String, val name: String)
+
+/**
+ * A team's project, stored at events/{eventId}/projects/{id}. The id doubles as the team code that
+ * teammates use to join. Each member registered and checked in individually.
+ */
 data class Project(
+    val id: String,
     val eventId: String,
-    val submittedBy: String,
-    val submitterName: String,
     val title: String,
     val description: String,
     val link: String,
-    val teamMembers: List<String>,
+    val members: List<TeamMember>,
+    val createdBy: String,
+    val assignedJudges: List<String>,
     val updatedAt: Long,
-)
+) {
+    val memberIds: List<String> get() = members.map { it.uid }
+    val teamLabel: String get() = members.joinToString(", ") { it.name }
+
+    companion object {
+        /** Keep in sync with firebase/firestore.rules. */
+        const val MAX_TEAM_SIZE = 4
+    }
+}
 
 enum class Criterion(val label: String) {
     INNOVATION("Innovation"),
@@ -97,3 +110,15 @@ data class Score(
         val MAX_TOTAL = MAX * Criterion.entries.size
     }
 }
+
+/** One row of a published leaderboard. Unscored projects have no rank or average. */
+data class ResultEntry(
+    val projectId: String,
+    val title: String,
+    val members: List<String>,
+    val rank: Int?,
+    val average: Double?,
+    val judgeCount: Int,
+)
+
+data class PublishedResults(val entries: List<ResultEntry>, val publishedAt: Long)

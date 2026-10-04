@@ -6,8 +6,14 @@ import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.Query
 import com.google.firebase.firestore.snapshots
+import com.google.firebase.firestore.FieldPath
+import com.google.firebase.firestore.FirebaseFirestoreException
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.tasks.await
 
@@ -19,11 +25,13 @@ import kotlinx.coroutines.tasks.await
  *                                                createdBy, createdAt
  *   events/{eventId}/checkIns/{uid}              userId, checkedInAt, checkedInBy, method
  *   events/{eventId}/registrations/{uid}         userId, registeredAt
- *   events/{eventId}/projects/{uid}              title, description, link, teamMembers, submittedBy,
- *                                                submitterName, createdAt, updatedAt
- *   events/{eventId}/projects/{uid}/scores/{judgeUid}
+ *   events/{eventId}/projects/{teamCode}         title, description, link, memberIds, members {uid: name},
+ *                                                createdBy, assignedJudges, createdAt, updatedAt
+ *   events/{eventId}/projects/{teamCode}/scores/{judgeUid}
  *                                                judgeId, innovation, technical, design, impact, comment,
  *                                                updatedAt
+ *   events/{eventId}/teamMembers/{uid}           projectId (at most one team per person per event)
+ *   events/{eventId}/results/leaderboard         entries, publishedAt, publishedBy
  */
 class AttendanceRepository(private val db: FirebaseFirestore) {
 
@@ -33,7 +41,7 @@ class AttendanceRepository(private val db: FirebaseFirestore) {
     fun user(uid: String): Flow<UserProfile?> =
         users.document(uid).snapshots().map { it.toUser() }.logErrors(null)
 
-    /** Staff only. */
+    /** Volunteers and organizers only. */
     fun users(): Flow<List<UserProfile>> =
         users.orderBy("name").snapshots().map { s -> s.documents.mapNotNull { it.toUser() } }.logErrors(emptyList())
 
@@ -81,20 +89,21 @@ class AttendanceRepository(private val db: FirebaseFirestore) {
         val projects = ref.collection("projects").get().await().documents
         val scores = projects.flatMap { it.reference.collection("scores").get().await().documents }
         val children = scores + projects +
-            ref.collection("checkIns").get().await().documents +
-            ref.collection("registrations").get().await().documents
+            listOf("teamMembers", "results", "checkIns", "registrations").flatMap {
+                ref.collection(it).get().await().documents
+            }
         children.chunked(400).forEach { chunk ->
             db.batch().apply { chunk.forEach { delete(it.reference) } }.commit().await()
         }
         ref.delete().await()
     }
 
-    /** Staff only. */
+    /** Volunteers and organizers only. */
     fun allCheckIns(): Flow<List<CheckIn>> =
         db.collectionGroup("checkIns").snapshots()
             .map { s -> s.documents.mapNotNull { it.toCheckIn() } }.logErrors(emptyList())
 
-    /** Staff only. */
+    /** Volunteers and organizers only. */
     fun allRegistrations(): Flow<List<Registration>> =
         db.collectionGroup("registrations").snapshots()
             .map { s -> s.documents.mapNotNull { it.toRegistration() } }.logErrors(emptyList())
@@ -140,65 +149,141 @@ class AttendanceRepository(private val db: FirebaseFirestore) {
         events.document(eventId).collection("checkIns").document(userId).delete().await()
     }
 
-    private fun projectRef(eventId: String, submitterId: String) =
-        events.document(eventId).collection("projects").document(submitterId)
+    private fun projectRef(eventId: String, projectId: String) =
+        events.document(eventId).collection("projects").document(projectId)
 
-    /** Judges and organizers only. */
-    fun projectsForEvent(eventId: String): Flow<List<Project>> =
-        events.document(eventId).collection("projects").snapshots()
-            .map { s -> s.documents.mapNotNull { it.toProject() } }.logErrors(emptyList())
+    private fun membershipRef(eventId: String, uid: String) =
+        events.document(eventId).collection("teamMembers").document(uid)
 
-    /** Judges and organizers only. */
-    fun allProjects(): Flow<List<Project>> =
-        db.collectionGroup("projects").snapshots()
-            .map { s -> s.documents.mapNotNull { it.toProject() } }.logErrors(emptyList())
+    private fun Query.projects(): Flow<List<Project>> =
+        snapshots().map { s -> s.documents.mapNotNull { it.toProject() } }.logErrors(emptyList())
 
+    /** Organizers only. */
+    fun projectsForEvent(eventId: String): Flow<List<Project>> = events.document(eventId).collection("projects").projects()
+
+    /** Organizers only. */
+    fun allProjects(): Flow<List<Project>> = db.collectionGroup("projects").projects()
+
+    /** Projects whose team includes [uid], across all events. */
     fun projectsOf(uid: String): Flow<List<Project>> =
-        db.collectionGroup("projects").whereEqualTo("submittedBy", uid).snapshots()
-            .map { s -> s.documents.mapNotNull { it.toProject() } }.logErrors(emptyList())
+        db.collectionGroup("projects").whereArrayContains("memberIds", uid).projects()
 
-    fun project(eventId: String, submitterId: String): Flow<Project?> =
-        projectRef(eventId, submitterId).snapshots().map { it.toProject() }.logErrors(null)
+    /** Projects assigned to judge [judgeId], across all events. */
+    fun assignedProjects(judgeId: String): Flow<List<Project>> =
+        db.collectionGroup("projects").whereArrayContains("assignedJudges", judgeId).projects()
 
-    /** Creates or updates the signed-in person's project. They must have been checked in. */
-    suspend fun saveProject(
-        eventId: String,
-        me: UserProfile,
-        title: String,
-        description: String,
-        link: String,
-        teamMembers: List<String>,
-    ) {
-        val ref = projectRef(eventId, me.uid)
-        val fields = mapOf(
-            "title" to title.trim(),
-            "description" to description.trim(),
-            "link" to link.trim(),
-            "teamMembers" to teamMembers.map { it.trim() }.filter { it.isNotEmpty() },
-            "submittedBy" to me.uid,
-            "submitterName" to me.name,
-            "updatedAt" to FieldValue.serverTimestamp(),
-        )
-        db.runTransaction { tx ->
-            val existing = tx.get(ref)
-            if (existing.exists()) {
-                tx.set(ref, fields + ("createdAt" to existing.get("createdAt")))
-            } else {
-                tx.set(ref, fields + ("createdAt" to FieldValue.serverTimestamp()))
-            }
-        }.await()
+    fun assignedProjects(eventId: String, judgeId: String): Flow<List<Project>> =
+        events.document(eventId).collection("projects").whereArrayContains("assignedJudges", judgeId).projects()
+
+    fun project(eventId: String, projectId: String): Flow<Project?> =
+        projectRef(eventId, projectId).snapshots().map { it.toProject() }.logErrors(null)
+
+    /** The team [uid] is on at [eventId], if any. */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    fun teamOf(eventId: String, uid: String): Flow<Project?> =
+        membershipRef(eventId, uid).snapshots()
+            .map { it.getString("projectId") }
+            .distinctUntilChanged()
+            .flatMapLatest { projectId -> if (projectId == null) flowOf(null) else project(eventId, projectId) }
+            .logErrors(null)
+
+    /** Starts a team project with [me] as its first member. Returns the team code. */
+    suspend fun createProject(eventId: String, me: UserProfile, title: String, description: String, link: String): String {
+        val code = TeamCode.generate()
+        db.batch().apply {
+            set(
+                projectRef(eventId, code),
+                mapOf(
+                    "title" to title.trim(),
+                    "description" to description.trim(),
+                    "link" to link.trim(),
+                    "memberIds" to listOf(me.uid),
+                    "members" to mapOf(me.uid to me.name),
+                    "createdBy" to me.uid,
+                    "assignedJudges" to emptyList<String>(),
+                    "createdAt" to FieldValue.serverTimestamp(),
+                    "updatedAt" to FieldValue.serverTimestamp(),
+                ),
+            )
+            set(membershipRef(eventId, me.uid), mapOf("projectId" to code))
+        }.commit().await()
+        return code
+    }
+
+    suspend fun updateProject(eventId: String, projectId: String, title: String, description: String, link: String) {
+        projectRef(eventId, projectId).update(
+            mapOf(
+                "title" to title.trim(),
+                "description" to description.trim(),
+                "link" to link.trim(),
+                "updatedAt" to FieldValue.serverTimestamp(),
+            )
+        ).await()
     }
 
     /**
-     * Owners (before the event ends) and organizers. Only organizers can see scores, so they also
-     * remove them; scores left behind by an owner's delete are ignored because rankings join on projects.
+     * Adds [me] to the team with [code]. People can't read a team before joining it, so the reasons
+     * a join is refused are reported together.
      */
-    suspend fun deleteProject(eventId: String, submitterId: String, asOrganizer: Boolean) {
-        val ref = projectRef(eventId, submitterId)
-        if (asOrganizer) {
-            ref.collection("scores").get().await().documents.forEach { it.reference.delete().await() }
+    suspend fun joinTeam(eventId: String, code: String, me: UserProfile) {
+        try {
+            db.batch().apply {
+                update(
+                    projectRef(eventId, code),
+                    FieldPath.of("memberIds"), FieldValue.arrayUnion(me.uid),
+                    FieldPath.of("members", me.uid), me.name,
+                )
+                set(membershipRef(eventId, me.uid), mapOf("projectId" to code))
+            }.commit().await()
+        } catch (e: FirebaseFirestoreException) {
+            throw IllegalStateException(
+                when (e.code) {
+                    FirebaseFirestoreException.Code.NOT_FOUND -> "No team has that code for this event."
+                    FirebaseFirestoreException.Code.PERMISSION_DENIED ->
+                        "Couldn't join. The team may be full (max ${Project.MAX_TEAM_SIZE}), you may already be on " +
+                            "a team, or you aren't checked in yet."
+                    else -> e.localizedMessage ?: "Couldn't join the team."
+                },
+                e,
+            )
         }
-        ref.delete().await()
+    }
+
+    /** Removes [me] from [project]; the last member leaving deletes the project. */
+    suspend fun leaveTeam(project: Project, me: UserProfile) {
+        val ref = projectRef(project.eventId, project.id)
+        db.batch().apply {
+            if (project.memberIds == listOf(me.uid)) {
+                delete(ref)
+            } else {
+                update(
+                    ref,
+                    FieldPath.of("memberIds"), FieldValue.arrayRemove(me.uid),
+                    FieldPath.of("members", me.uid), FieldValue.delete(),
+                )
+            }
+            delete(membershipRef(project.eventId, me.uid))
+        }.commit().await()
+    }
+
+    /** Organizers only: removes the project, its scores and its members' team records. */
+    suspend fun deleteProject(project: Project) {
+        val ref = projectRef(project.eventId, project.id)
+        val scores = ref.collection("scores").get().await().documents.map { it.reference }
+        db.batch().apply {
+            scores.forEach { delete(it) }
+            project.memberIds.forEach { delete(membershipRef(project.eventId, it)) }
+            delete(ref)
+        }.commit().await()
+    }
+
+    /** Organizers only. */
+    suspend fun setAssignedJudges(eventId: String, assignments: Map<String, List<String>>) {
+        assignments.entries.chunked(400).forEach { chunk ->
+            db.batch().apply {
+                chunk.forEach { (projectId, judges) -> update(projectRef(eventId, projectId), "assignedJudges", judges) }
+            }.commit().await()
+        }
     }
 
     /** Organizers only. */
@@ -210,7 +295,12 @@ class AttendanceRepository(private val db: FirebaseFirestore) {
         db.collectionGroup("scores").whereEqualTo("judgeId", judgeId).snapshots()
             .map { s -> s.documents.mapNotNull { it.toScore() } }.logErrors(emptyList())
 
-    /** Judges only; replaces the judge's previous score for this project. */
+    /** Team members, once results are published. */
+    fun scoresForProject(eventId: String, projectId: String): Flow<List<Score>> =
+        projectRef(eventId, projectId).collection("scores").snapshots()
+            .map { s -> s.documents.mapNotNull { it.toScore() } }.logErrors(emptyList())
+
+    /** Judges only, for projects assigned to them; replaces the judge's previous score. */
     suspend fun saveScore(eventId: String, projectId: String, judgeId: String, values: Map<Criterion, Int>, comment: String) {
         projectRef(eventId, projectId).collection("scores").document(judgeId).set(
             mapOf(
@@ -223,6 +313,35 @@ class AttendanceRepository(private val db: FirebaseFirestore) {
                 "updatedAt" to FieldValue.serverTimestamp(),
             )
         ).await()
+    }
+
+    private fun resultsRef(eventId: String) = events.document(eventId).collection("results").document("leaderboard")
+
+    fun results(eventId: String): Flow<PublishedResults?> =
+        resultsRef(eventId).snapshots().map { it.toResults() }.logErrors(null)
+
+    /** Organizers only. Publishing again replaces the previous snapshot. */
+    suspend fun publishResults(eventId: String, entries: List<ResultEntry>, publishedBy: String) {
+        resultsRef(eventId).set(
+            mapOf(
+                "entries" to entries.map {
+                    mapOf(
+                        "projectId" to it.projectId,
+                        "title" to it.title,
+                        "members" to it.members,
+                        "rank" to it.rank,
+                        "average" to it.average,
+                        "judgeCount" to it.judgeCount,
+                    )
+                },
+                "publishedAt" to FieldValue.serverTimestamp(),
+                "publishedBy" to publishedBy,
+            )
+        ).await()
+    }
+
+    suspend fun unpublishResults(eventId: String) {
+        resultsRef(eventId).delete().await()
     }
 
     private fun <T> Flow<T>.logErrors(fallback: T): Flow<T> = catch { e ->
@@ -276,16 +395,36 @@ private fun DocumentSnapshot.toRegistration(): Registration? {
 
 private fun DocumentSnapshot.toProject(): Project? {
     if (!exists()) return null
+    val memberIds = (get("memberIds") as? List<*>)?.filterIsInstance<String>().orEmpty()
+    val names = (get("members") as? Map<*, *>).orEmpty()
     return Project(
+        id = id,
         eventId = reference.parent.parent?.id ?: return null,
-        submittedBy = getString("submittedBy") ?: return null,
-        submitterName = getString("submitterName").orEmpty(),
         title = getString("title").orEmpty(),
         description = getString("description").orEmpty(),
         link = getString("link").orEmpty(),
-        teamMembers = (get("teamMembers") as? List<*>)?.filterIsInstance<String>().orEmpty(),
+        members = memberIds.map { TeamMember(it, names[it] as? String ?: "Teammate") },
+        createdBy = getString("createdBy").orEmpty(),
+        assignedJudges = (get("assignedJudges") as? List<*>)?.filterIsInstance<String>().orEmpty(),
         updatedAt = getTimestamp("updatedAt", DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)?.toDate()?.time ?: 0L,
     )
+}
+
+private fun DocumentSnapshot.toResults(): PublishedResults? {
+    if (!exists()) return null
+    val entries = (get("entries") as? List<*>).orEmpty().mapNotNull { raw ->
+        val m = raw as? Map<*, *> ?: return@mapNotNull null
+        ResultEntry(
+            projectId = m["projectId"] as? String ?: return@mapNotNull null,
+            title = m["title"] as? String ?: "",
+            members = (m["members"] as? List<*>)?.filterIsInstance<String>().orEmpty(),
+            rank = (m["rank"] as? Number)?.toInt(),
+            average = (m["average"] as? Number)?.toDouble(),
+            judgeCount = (m["judgeCount"] as? Number)?.toInt() ?: 0,
+        )
+    }
+    val publishedAt = getTimestamp("publishedAt", DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)?.toDate()?.time ?: 0L
+    return PublishedResults(entries, publishedAt)
 }
 
 private fun DocumentSnapshot.toScore(): Score? {

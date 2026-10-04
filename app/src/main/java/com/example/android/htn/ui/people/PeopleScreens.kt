@@ -216,8 +216,8 @@ fun PersonScreen(
                         projects.forEach { (event, project) ->
                             ListItem(
                                 headlineContent = { Text(project.title) },
-                                supportingContent = { Text(event.name) },
-                                modifier = Modifier.clickable { onOpenProject(event.id, project.submittedBy) },
+                                supportingContent = { Text("${event.name} · ${project.teamLabel}") },
+                                modifier = Modifier.clickable { onOpenProject(event.id, project.id) },
                             )
                         }
                     }

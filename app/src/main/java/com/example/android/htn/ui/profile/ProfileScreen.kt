@@ -138,11 +138,14 @@ fun ProfileScreen(me: UserProfile, onOpenEvent: (String) -> Unit, onOpenTab: (St
 private fun roleStats(repository: AttendanceRepository, me: UserProfile): Flow<RoleStats> =
     when (me.role) {
         Role.PARTICIPANT -> repository.projectsOf(me.uid).map {
-            RoleStats(listOf("Projects submitted" to "${it.size}"), action = "projects")
+            RoleStats(listOf("Team projects" to "${it.size}"), action = "projects")
         }
-        Role.JUDGE -> combine(repository.allProjects(), repository.scoresBy(me.uid)) { projects, scores ->
+        Role.JUDGE -> combine(repository.assignedProjects(me.uid), repository.scoresBy(me.uid)) { projects, scores ->
             val progress = Judging.progress(me.uid, projects, scores)
-            RoleStats(listOf("Scored" to "${progress.scored}", "Left to score" to "${progress.remaining}"), action = "projects")
+            RoleStats(
+                listOf("Assigned" to "${progress.total}", "Scored" to "${progress.scored}", "Left to score" to "${progress.remaining}"),
+                action = "projects",
+            )
         }
         Role.VOLUNTEER -> repository.allCheckIns().map { checkIns ->
             val mine = checkIns.filter { it.checkedInBy == me.uid }

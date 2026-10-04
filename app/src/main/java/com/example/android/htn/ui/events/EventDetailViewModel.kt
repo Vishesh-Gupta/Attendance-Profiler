@@ -37,10 +37,11 @@ data class EventDetailState(
     val arrivals: List<Arrival> = emptyList(),
     /** Check-in staff only, for manual check-in. */
     val people: List<UserProfile> = emptyList(),
-    /** The signed-in person's own submission, if any. */
-    val myProject: Project? = null,
-    /** Judges and organizers only. */
+    /** The team the signed-in person is on for this event, if any. */
+    val myTeam: Project? = null,
+    /** Organizers: all projects. Judges: projects assigned to them. */
     val projectCount: Int = 0,
+    val resultsPublished: Boolean = false,
 )
 
 sealed interface ScanOutcome {
@@ -91,10 +92,15 @@ class EventDetailViewModel(
 
     val state: StateFlow<EventDetailState> = combine(
         attendance,
-        repository.project(eventId, me.uid),
-        if (role.canSeeAllProjects) repository.projectsForEvent(eventId) else flowOf(emptyList()),
-    ) { base, myProject, projects ->
-        base.copy(myProject = myProject, projectCount = projects.size)
+        repository.teamOf(eventId, me.uid),
+        when {
+            role.canSeeEveryone -> repository.projectsForEvent(eventId)
+            role.canJudge -> repository.assignedProjects(eventId, me.uid)
+            else -> flowOf(emptyList())
+        },
+        repository.results(eventId),
+    ) { base, myTeam, projects, results ->
+        base.copy(myTeam = myTeam, projectCount = projects.size, resultsPublished = results != null)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), EventDetailState())
 
     fun setRegistered(register: Boolean) = launchReporting {
