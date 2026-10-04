@@ -77,13 +77,9 @@ fun EventsScreen(me: UserProfile, onOpenEvent: (String) -> Unit) {
         combine(repository.events(), checkIns, repository.registrationsOf(me.uid)) { events, checkIns, regs ->
             val counts = checkIns.groupingBy { it.eventId }.eachCount()
             val mine = checkIns.filter { it.userId == me.uid }.map { it.eventId }.toSet()
-            val registered = regs.map { it.eventId }.toSet()
+            val applications = regs.associate { it.eventId to it.status }
             events.map { event ->
-                val status = when (event.id) {
-                    in mine -> "Checked in"
-                    in registered -> "Registered"
-                    else -> null
-                }
+                val status = if (event.id in mine) "Checked in" else applications[event.id]?.label
                 EventRow(event, status, if (me.role.canCheckIn) counts[event.id] ?: 0 else null)
             }
         }

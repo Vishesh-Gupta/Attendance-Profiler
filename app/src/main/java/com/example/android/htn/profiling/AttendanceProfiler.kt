@@ -35,13 +35,14 @@ data class AttendanceProfile(
 )
 
 data class EventSummary(
+    /** Approved applications. */
     val registered: Int,
     val checkedIn: Int,
     val firstTimers: Int,
     val returning: Int,
-    /** Checked in without registering. */
+    /** Checked in without an approved application (judges, volunteers, organizers). */
     val walkIns: Int,
-    /** Registered people who haven't checked in. */
+    /** Approved people who haven't checked in. */
     val notYetArrived: Int,
     val byRole: Map<Role, Int>,
 )
@@ -118,7 +119,8 @@ object AttendanceProfiler {
     ): AttendanceProfile = profile(
         allEvents,
         checkIns.filter { it.userId == userId }.map { it.eventId }.toSet(),
-        registrations.filter { it.userId == userId }.map { it.eventId }.toSet(),
+        // Only approved applications mean someone was expected; others can't be no-shows.
+        registrations.filter { it.userId == userId && it.approved }.map { it.eventId }.toSet(),
         todayEpochDay,
     )
 
@@ -133,7 +135,7 @@ object AttendanceProfiler {
         val earlierEventIds = allEvents.filter { chronological.compare(it, event) < 0 }.map { it.id }.toSet()
         val returningIds = allCheckIns.filter { it.eventId in earlierEventIds }.map { it.userId }.toSet()
         val checkedInIds = allCheckIns.filter { it.eventId == event.id }.map { it.userId }.toSet()
-        val registeredIds = allRegistrations.filter { it.eventId == event.id }.map { it.userId }.toSet()
+        val registeredIds = allRegistrations.filter { it.eventId == event.id && it.approved }.map { it.userId }.toSet()
         val returning = checkedInIds.count { it in returningIds }
         return EventSummary(
             registered = registeredIds.size,
