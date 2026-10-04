@@ -4,8 +4,8 @@ rules_version = '2';
 // - Everyone signs up as PARTICIPANT; only organizers can change roles.
 // - Organizers see everything.
 // - Volunteers run check-in: they see people, registrations and check-ins.
-// - Judges only see project submissions and their own scores.
-// - Participants see their own profile, attendance and projects.
+// - Judges only see the projects assigned to them and their own scores.
+// - Participants see their own profile, attendance and team projects, plus results once published.
 service cloud.firestore {
   match /databases/{database}/documents {
 
@@ -29,7 +29,6 @@ service cloud.firestore {
     function isOrganizer() { return hasRole(['ORGANIZER']); }
     function canCheckIn() { return hasRole(['VOLUNTEER', 'ORGANIZER']); }
     function isJudge() { return hasRole(['JUDGE']); }
-    function canSeeProjects() { return hasRole(['JUDGE', 'ORGANIZER']); }
 
     function isSelf(uid) { return signedIn() && request.auth.uid == uid; }
 
@@ -110,41 +109,101 @@ service cloud.firestore {
         allow delete: if isSelf(userId) || isOrganizer();
       }
 
-      // Document id is the submitter's uid: one project per person per event. Only people who were
-      // checked in can submit, and only until the event ends.
-      match /projects/{submitterId} {
-        function validProject() {
-          let p = request.resource.data;
-          return p.keys().hasOnly(
-              ['title', 'description', 'link', 'teamMembers', 'submittedBy', 'submitterName', 'createdAt', 'updatedAt'])
-            && shortText(p.title, 1)
+      // A team's project. Each person registers and checks in individually, then one teammate
+      // creates the project and the others join it with its id (the team code). Membership is
+      // mirrored in teamMembers/{uid}, which can only be created once, so each person is on at most
+      // one team per event. Every write that changes membership must update both in the same batch.
+      match /projects/{projectId} {
+        function projectFields(p) {
+          return shortText(p.title, 1)
             && text(p.description, 1, 5000)
-            && text(p.link, 0, 500)
-            && p.teamMembers is list && p.teamMembers.size() <= 10
-            && p.submittedBy == submitterId
-            && shortText(p.submitterName, 1)
-            && p.updatedAt == request.time;
+            && text(p.link, 0, 500);
         }
 
-        allow create: if isSelf(submitterId)
-          && exists(/databases/$(database)/documents/events/$(eventId)/checkIns/$(submitterId))
-          && eventNotOver(eventId)
-          && validProject()
-          && request.resource.data.createdAt == request.time;
+        function membersMatch(p) {
+          return p.memberIds is list
+            && p.members is map
+            && p.members.keys().toSet() == p.memberIds.toSet()
+            && p.members.size() == p.memberIds.size();
+        }
 
-        allow update: if isSelf(submitterId)
-          && eventNotOver(eventId)
-          && validProject()
-          && request.resource.data.createdAt == resource.data.createdAt;
+        function checkedIn(uid) {
+          return exists(/databases/$(database)/documents/events/$(eventId)/checkIns/$(uid));
+        }
 
-        allow delete: if (isSelf(submitterId) && eventNotOver(eventId)) || isOrganizer();
+        function membershipAfter(uid) {
+          return /databases/$(database)/documents/events/$(eventId)/teamMembers/$(uid);
+        }
+
+        function joinsThisTeamAfter(uid) {
+          return existsAfter(membershipAfter(uid)) && getAfter(membershipAfter(uid)).data.projectId == projectId;
+        }
+
+        allow create: if signedIn()
+          && checkedIn(request.auth.uid)
+          && eventNotOver(eventId)
+          && request.resource.data.keys().hasOnly(
+            ['title', 'description', 'link', 'memberIds', 'members', 'createdBy', 'assignedJudges', 'createdAt', 'updatedAt'])
+          && projectFields(request.resource.data)
+          && request.resource.data.memberIds == [request.auth.uid]
+          && membersMatch(request.resource.data)
+          && shortText(request.resource.data.members[request.auth.uid], 1)
+          && request.resource.data.createdBy == request.auth.uid
+          && request.resource.data.assignedJudges == []
+          && request.resource.data.createdAt == request.time
+          && request.resource.data.updatedAt == request.time
+          && joinsThisTeamAfter(request.auth.uid);
+
+        // Members edit the details.
+        allow update: if signedIn()
+          && request.auth.uid in resource.data.memberIds
+          && eventNotOver(eventId)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['title', 'description', 'link', 'updatedAt'])
+          && projectFields(request.resource.data)
+          && request.resource.data.updatedAt == request.time;
+
+        // Someone checked in joins (adds only themselves).
+        allow update: if signedIn()
+          && !(request.auth.uid in resource.data.memberIds)
+          && checkedIn(request.auth.uid)
+          && eventNotOver(eventId)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['memberIds', 'members'])
+          && request.resource.data.memberIds.toSet() == resource.data.memberIds.toSet().union([request.auth.uid].toSet())
+          && request.resource.data.memberIds.size() == resource.data.memberIds.size() + 1
+          && request.resource.data.memberIds.size() <= 4
+          && membersMatch(request.resource.data)
+          && request.resource.data.members.diff(resource.data.members).affectedKeys().hasOnly([request.auth.uid])
+          && shortText(request.resource.data.members[request.auth.uid], 1)
+          && joinsThisTeamAfter(request.auth.uid);
+
+        // A member leaves (removes only themselves); the last member deletes the project instead.
+        allow update: if signedIn()
+          && request.auth.uid in resource.data.memberIds
+          && eventNotOver(eventId)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['memberIds', 'members'])
+          && request.resource.data.memberIds.toSet() == resource.data.memberIds.toSet().difference([request.auth.uid].toSet())
+          && request.resource.data.memberIds.size() == resource.data.memberIds.size() - 1
+          && request.resource.data.memberIds.size() >= 1
+          && membersMatch(request.resource.data)
+          && !existsAfter(membershipAfter(request.auth.uid));
+
+        // Organizers assign judges.
+        allow update: if isOrganizer()
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['assignedJudges'])
+          && request.resource.data.assignedJudges is list
+          && request.resource.data.assignedJudges.size() <= 20;
+
+        allow delete: if isOrganizer()
+          || (signedIn() && resource.data.memberIds == [request.auth.uid]
+            && eventNotOver(eventId)
+            && !existsAfter(membershipAfter(request.auth.uid)));
 
         // Document id is the judge's uid: one score per judge per project.
         match /scores/{judgeId} {
           function validScore(value) { return value is int && value >= 1 && value <= 10; }
 
           allow create, update: if isJudge() && isSelf(judgeId)
-            && exists(/databases/$(database)/documents/events/$(eventId)/projects/$(submitterId))
+            && judgeId in get(/databases/$(database)/documents/events/$(eventId)/projects/$(projectId)).data.assignedJudges
             && request.resource.data.keys().hasOnly(
               ['judgeId', 'innovation', 'technical', 'design', 'impact', 'comment', 'updatedAt'])
             && request.resource.data.judgeId == judgeId
@@ -156,7 +215,43 @@ service cloud.firestore {
             && request.resource.data.updatedAt == request.time;
 
           allow delete: if isSelf(judgeId) || isOrganizer();
+
+          // Once results are published, team members see their own project's scores. Judges stay
+          // anonymous to them because participants can't read user profiles.
+          allow read: if signedIn()
+            && exists(/databases/$(database)/documents/events/$(eventId)/results/leaderboard)
+            && request.auth.uid in get(/databases/$(database)/documents/events/$(eventId)/projects/$(projectId)).data.memberIds;
         }
+      }
+
+      match /teamMembers/{uid} {
+        function projectAfter(projectId) {
+          return /databases/$(database)/documents/events/$(eventId)/projects/$(projectId);
+        }
+
+        allow read: if isSelf(uid) || isOrganizer();
+
+        allow create: if isSelf(uid)
+          && request.resource.data.keys().hasOnly(['projectId'])
+          && request.resource.data.projectId is string
+          && existsAfter(projectAfter(request.resource.data.projectId))
+          && uid in getAfter(projectAfter(request.resource.data.projectId)).data.memberIds;
+
+        allow delete: if isOrganizer()
+          || (isSelf(uid) && (
+            !existsAfter(projectAfter(resource.data.projectId))
+            || !(uid in getAfter(projectAfter(resource.data.projectId)).data.memberIds)));
+      }
+
+      // Published results: a snapshot of the leaderboard that organizers write when they publish.
+      match /results/{docId} {
+        allow read: if signedIn();
+        allow create, update: if isOrganizer() && docId == 'leaderboard'
+          && request.resource.data.keys().hasOnly(['entries', 'publishedAt', 'publishedBy'])
+          && request.resource.data.entries is list
+          && request.resource.data.publishedAt == request.time
+          && request.resource.data.publishedBy == request.auth.uid;
+        allow delete: if isOrganizer();
       }
     }
 
@@ -170,10 +265,11 @@ service cloud.firestore {
       allow read: if canCheckIn() || (signedIn() && resource.data.userId == request.auth.uid);
     }
 
-    match /{path=**}/projects/{submitterId} {
-      // isSelf lets owners read their not-yet-created project (needed before the first submission).
-      allow read: if canSeeProjects() || isSelf(submitterId)
-        || (signedIn() && resource.data.submittedBy == request.auth.uid);
+    // Organizers see every project, judges only those assigned to them, members their own team's.
+    match /{path=**}/projects/{projectId} {
+      allow read: if isOrganizer()
+        || (signedIn() && request.auth.uid in resource.data.memberIds)
+        || (isJudge() && request.auth.uid in resource.data.assignedJudges);
     }
 
     // Judges only see their own scores, so they score independently. Organizers see all of them.
