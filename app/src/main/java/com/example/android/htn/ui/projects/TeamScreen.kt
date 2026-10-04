@@ -55,7 +55,7 @@ import com.example.android.htn.ui.userMessage
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 
-/** [application]: the person's application status; only approved people can create or join teams. */
+/** [application]: the person's application status; only confirmed people can create or join teams. */
 private data class TeamState(val event: Event?, val team: Project?, val application: RegistrationStatus?)
 
 /** A participant's team for one event: create or join it, share its code, edit the project, or leave. */
@@ -126,14 +126,23 @@ fun TeamScreen(eventId: String, me: UserProfile, onBack: () -> Unit) {
                 }
                 !open -> Text("Project submissions for this event are closed.")
                 s.application == null -> {
-                    Text("Apply to attend this event first. Once organizers approve you, you can create or join a team.")
+                    Text("Apply to attend this event first. Once you're approved and confirm your spot, you can create or join a team.")
                     Button(onClick = { run("Application sent") { repository.register(eventId, me.uid) } }, enabled = !busy) {
                         Text("Apply to attend")
                     }
                 }
-                s.application != RegistrationStatus.APPROVED -> Text(
-                    "Your application is ${s.application.label.lowercase()}. Only approved people can create or join " +
-                        "teams. You'll get an email when organizers decide."
+                s.application == RegistrationStatus.APPROVED -> {
+                    Text(
+                        "You're approved! Tap \"Confirm my spot\" in the email we sent to ${me.email}, then come back " +
+                            "here to create or join a team."
+                    )
+                    OutlinedButton(onClick = { run("Sent. Check your email.") { repository.resendConfirmationEmail(eventId, me.uid) } }, enabled = !busy) {
+                        Text("Resend confirmation email")
+                    }
+                }
+                s.application != RegistrationStatus.CONFIRMED -> Text(
+                    "Your application is ${s.application.label.lowercase()}. Only people who are approved and have " +
+                        "confirmed their spot can create or join teams. You'll get an email when organizers decide."
                 )
                 else -> {
                     JoinTeamSection(eventId, busy, onError = { scope.launch { snackbar.showSnackbar(it) } }) { code ->
@@ -143,7 +152,7 @@ fun TeamScreen(eventId: String, me: UserProfile, onBack: () -> Unit) {
                     Text("Or start a new team", style = MaterialTheme.typography.titleMedium)
                     Text(
                         "You'll get a team code to share. Up to ${Project.MAX_TEAM_SIZE} people per team, " +
-                            "and each teammate needs an approved application.",
+                            "and each teammate needs a confirmed spot.",
                         style = MaterialTheme.typography.bodySmall,
                     )
                     ProjectForm(

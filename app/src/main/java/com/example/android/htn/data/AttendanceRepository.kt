@@ -129,6 +129,20 @@ class AttendanceRepository(private val db: FirebaseFirestore) {
     }
 
     /**
+     * Approved applicants who lost the email: sends the "confirm my spot" email again. The rules
+     * allow this once every 5 minutes.
+     */
+    suspend fun resendConfirmationEmail(eventId: String, uid: String) {
+        try {
+            events.document(eventId).collection("registrations").document(uid)
+                .update("resendRequestedAt", FieldValue.serverTimestamp()).await()
+        } catch (e: FirebaseFirestoreException) {
+            if (e.code != FirebaseFirestoreException.Code.PERMISSION_DENIED) throw e
+            throw IllegalStateException("The email was sent recently. Check your inbox and spam folder, or try again in a few minutes.", e)
+        }
+    }
+
+    /**
      * Organizers only: records a decision for someone who never applied, such as a walk-in. Like
      * [setRegistrationStatus], this emails them.
      */
@@ -163,7 +177,7 @@ class AttendanceRepository(private val db: FirebaseFirestore) {
     }
 
     /**
-     * Volunteers and organizers only. Participants need an approved application. Needs a connection,
+     * Volunteers and organizers only. Participants must have confirmed their spot. Needs a connection,
      * since it checks for an existing check-in.
      */
     suspend fun checkIn(eventId: String, userId: String, checkedInBy: String, method: CheckInMethod): CheckInResult {
@@ -175,7 +189,7 @@ class AttendanceRepository(private val db: FirebaseFirestore) {
             if (tx.get(checkInRef).exists()) return@runTransaction CheckInResult.AlreadyCheckedIn(user)
             if (user.role == Role.PARTICIPANT) {
                 val registration = tx.get(registrationRef).toRegistration()
-                if (registration?.approved != true) {
+                if (registration?.confirmed != true) {
                     return@runTransaction CheckInResult.NotApproved(user, registration?.status)
                 }
             }
@@ -236,7 +250,7 @@ class AttendanceRepository(private val db: FirebaseFirestore) {
 
     /**
      * Starts a team project with [me] as its first member. Returns the team code. [me] must be
-     * approved for the event and not on another team.
+     * confirmed for the event and not on another team.
      */
     suspend fun createProject(eventId: String, me: UserProfile, title: String, description: String, link: String): String {
         val code = TeamCode.generate()
@@ -272,7 +286,7 @@ class AttendanceRepository(private val db: FirebaseFirestore) {
     }
 
     /**
-     * Adds [me] to the team with [code]. [me] must be approved for the event, and must have left any
+     * Adds [me] to the team with [code]. [me] must be confirmed for the event, and must have left any
      * other team for this event first. People can't read a team before joining it, so the reasons a
      * join is refused are reported together.
      */
@@ -292,7 +306,7 @@ class AttendanceRepository(private val db: FirebaseFirestore) {
                     FirebaseFirestoreException.Code.NOT_FOUND -> "No team has that code for this event."
                     FirebaseFirestoreException.Code.PERMISSION_DENIED ->
                         "Couldn't join. The team may be full (max ${Project.MAX_TEAM_SIZE}), you may still be on " +
-                            "another team (leave it first), or your application hasn't been approved yet."
+                            "another team (leave it first), or you haven't confirmed your spot yet."
                     else -> e.localizedMessage ?: "Couldn't join the team."
                 },
                 e,
@@ -448,6 +462,7 @@ private fun DocumentSnapshot.toRegistration(): Registration? {
         status = RegistrationStatus.parse(getString("status")),
         registeredAt = getTimestamp("registeredAt", DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)?.toDate()?.time ?: 0L,
         notifiedStatus = getString("notifiedStatus")?.let { RegistrationStatus.parse(it) },
+        confirmedVia = getString("confirmedVia"),
     )
 }
 
