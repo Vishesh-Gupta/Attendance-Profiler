@@ -143,13 +143,15 @@ describe('events', () => {
   });
 });
 
-const approve = (admin, eventId, uid, status = 'APPROVED') =>
+const approve = (admin, eventId, uid, status = 'CONFIRMED') =>
   setDoc(doc(admin, `events/${eventId}/registrations/${uid}`), { userId: uid, registeredAt: new Date(), status });
 
 describe('check-ins', () => {
   beforeEach(() => env.withSecurityRulesDisabled((ctx) => approve(ctx.firestore(), 'htn', 'ada')));
 
-  test('participants must be approved before they can be checked in', async () => {
+  test('participants must have confirmed before they can be checked in', async () => {
+    await env.withSecurityRulesDisabled((ctx) => approve(ctx.firestore(), 'htn', 'ada', 'APPROVED'));
+    await assertFails(setDoc(doc(db('vol'), 'events/htn/checkIns/ada'), checkIn('vol', 'ada')));
     await env.withSecurityRulesDisabled((ctx) => approve(ctx.firestore(), 'htn', 'ada', 'WAITLISTED'));
     await assertFails(setDoc(doc(db('vol'), 'events/htn/checkIns/ada'), checkIn('vol', 'ada')));
     await env.withSecurityRulesDisabled((ctx) => deleteDoc(doc(ctx.firestore(), 'events/htn/registrations/ada')));
@@ -213,7 +215,7 @@ describe('registrations', () => {
     await setDoc(doc(db('ada'), 'events/htn/registrations/ada'), registration('ada'));
     await assertFails(updateDoc(doc(db('vol'), 'events/htn/registrations/ada'), decide('APPROVED', 'vol')));
     await assertFails(updateDoc(doc(db('judge'), 'events/htn/registrations/ada'), decide('APPROVED', 'judge')));
-    for (const status of ['APPROVED', 'WAITLISTED', 'DECLINED', 'PENDING']) {
+    for (const status of ['APPROVED', 'CONFIRMED', 'WAITLISTED', 'DECLINED', 'PENDING']) {
       await assertSucceeds(updateDoc(doc(db('org'), 'events/htn/registrations/ada'), decide(status)));
     }
     await assertFails(updateDoc(doc(db('org'), 'events/htn/registrations/ada'), decide('MAYBE')));
@@ -226,6 +228,20 @@ describe('registrations', () => {
     await assertFails(setDoc(doc(db('vol'), 'events/htn/registrations/ada'), onBehalf('vol')));
     await assertFails(setDoc(doc(db('org'), 'events/htn/registrations/ghost'), { ...onBehalf('org'), userId: 'ghost' }));
     await assertSucceeds(setDoc(doc(db('org'), 'events/htn/registrations/ada'), onBehalf('org')));
+  });
+
+  test('approved applicants can ask for the confirmation email again, but not confirm themselves', async () => {
+    await env.withSecurityRulesDisabled((ctx) => approve(ctx.firestore(), 'htn', 'ada', 'APPROVED'));
+    const ref = doc(db('ada'), 'events/htn/registrations/ada');
+    await assertFails(updateDoc(ref, { status: 'CONFIRMED' }));
+    await assertSucceeds(updateDoc(ref, { resendRequestedAt: serverTimestamp() }));
+    await assertFails(updateDoc(ref, { resendRequestedAt: serverTimestamp() })); // too soon
+    await assertFails(updateDoc(doc(db('bob'), 'events/htn/registrations/ada'), { resendRequestedAt: serverTimestamp() }));
+  });
+
+  test('only approved (unconfirmed) applicants can ask for a resend', async () => {
+    await env.withSecurityRulesDisabled((ctx) => approve(ctx.firestore(), 'htn', 'ada', 'PENDING'));
+    await assertFails(updateDoc(doc(db('ada'), 'events/htn/registrations/ada'), { resendRequestedAt: serverTimestamp() }));
   });
 
   test('cannot apply to an event that is over', async () => {
@@ -323,19 +339,21 @@ describe('teams', () => {
     await assertSucceeds(createProject('ada', 'TEAMCODE01'));
   });
 
-  test('approved participants form teams before checking in', async () => {
+  test('confirmed participants form teams before checking in', async () => {
     await assertSucceeds(createProject('gus', 'TEAMCODE16'));
     await assertSucceeds(joinTeam('hal', 'TEAMCODE16'));
   });
 
-  test('pending or waitlisted applicants cannot create or join teams', async () => {
+  test('pending, waitlisted or approved-but-unconfirmed applicants cannot create or join teams', async () => {
     await createProject('gus', 'TEAMCODE21');
     await assertFails(createProject('ivy', 'TEAMCODE22'));
     await assertFails(joinTeam('ivy', 'TEAMCODE21'));
     await assertFails(joinTeam('jo', 'TEAMCODE21'));
+    await env.withSecurityRulesDisabled((ctx) => approve(ctx.firestore(), 'htn', 'kim', 'APPROVED'));
+    await assertFails(joinTeam('kim', 'TEAMCODE21'));
   });
 
-  test('cannot create a project without approval, or after the event', async () => {
+  test('cannot create a project without confirming, or after the event', async () => {
     await assertFails(createProject('judge', 'TEAMCODE02'));
     await assertFails(createProject('ada', 'TEAMCODE03', 'old'));
   });
@@ -391,7 +409,7 @@ describe('teams', () => {
     await assertFails(batch.commit()); // ada's existing teamMembers record blocks a second membership
   });
 
-  test('cannot join without being approved', async () => {
+  test('cannot join without having confirmed', async () => {
     await createProject('ada', 'TEAMCODE11');
     await assertFails(joinTeam('judge', 'TEAMCODE11'));
   });

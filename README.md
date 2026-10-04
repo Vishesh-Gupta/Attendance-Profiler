@@ -15,12 +15,12 @@ data that's meant for it.
 |---|:-:|:-:|:-:|:-:|
 | Tabs | Profile, Events, My projects | Profile, Events, Judging | Profile, Events | Profile, Events, People, Projects |
 | Own profile, QR pass, own attendance, event calendar, apply to events | ✓ | ✓ | ✓ | ✓ |
-| Create, join or switch team projects at events they're approved for | ✓ | | | |
+| Create, join or switch team projects at events they've confirmed for | ✓ | | | |
 | See published results; teams see their own scores and notes | ✓ | ✓ | ✓ | ✓ |
 | See and score the projects assigned to them (only their own scores) | | ✓ | | |
-| Check people in (QR or manual), see arrivals; participants must be approved | | | ✓ | ✓ |
+| Check people in (QR or manual), see arrivals; participants must be confirmed | | | ✓ | ✓ |
 | See everyone: people directory, attendance profiles, event stats, all scores, leaderboard | | | | ✓ |
-| Review applications (approve, waitlist, decline); applicants are emailed | | | | ✓ |
+| Review applications (approve, waitlist, decline); applicants are emailed and confirm by email | | | | ✓ |
 | Assign judges, publish results, create/delete events, remove projects, change roles | | | | ✓ |
 
 Everyone signs up as a **participant**. Organizers promote people from the person's profile
@@ -41,25 +41,34 @@ Everyone signs up as a **participant**. Organizers promote people from the perso
   events. Organizers can tap + to create an event starting on the selected day, then pick its
   dates from a calendar.
 - **Applications**: registering for an event is an application that organizers review by hand.
-  - Applicants see their status on the event page: *Pending review*, *Approved*, *Waitlisted* or
-    *Declined*. They can withdraw; applying again puts them back in the queue.
-  - Organizers open **Applications** from the event page and filter by status. Each applicant
-    shows their attendance history from other events (tier, attendance rate, no-shows) to help
-    decide. Approve, Waitlist and Decline each ask for confirmation, and Undo moves a decision
-    back to pending.
-  - **Each decision is emailed to the applicant automatically**: the `onRegistrationDecision` Cloud
-    Function queues the email and the Firebase Trigger Email extension sends it. Organizers can see
-    whether the email has gone out ("Emailed: approved").
-  - **Only approved people continue.** Only approved participants can form or join teams, and
-    participants can't be checked in unless they're approved. Judges, volunteers and organizers
+  1. People **apply**. Their status shows on the event page.
+  2. Organizers open **Applications** from the event page and **approve, waitlist or decline**.
+     Each applicant shows their attendance history from other events (tier, attendance rate,
+     no-shows) to help decide. Every decision asks for confirmation, and Undo moves a decision back
+     to pending.
+  3. The applicant is **emailed the decision automatically**. The approval email has a
+     **Confirm my spot** button.
+  4. The button opens a small page with a Confirm button. Tapping it marks the spot **Confirmed**
+     and emails a receipt with next steps. Merely opening the link changes nothing, so email
+     security scanners that open every link can't confirm on someone's behalf.
+  - **Only confirmed people continue.** Only confirmed participants can form or join teams, and
+    participants can't be checked in until they're confirmed. Judges, volunteers and organizers
     can be checked in without applying.
-  - Organizers can approve someone on the spot from the check-in desk ("Approve & check in"),
-    even if they never applied.
+  - Confirmation links can't be guessed, are stored only on the server, and stop working if an
+    organizer undoes or changes the approval.
+  - Approved people who lost the email can tap **Resend confirmation email** in the app (at most
+    once every 5 minutes).
+  - Organizers can **Mark confirmed** someone who confirmed another way, and can
+    **Approve/Confirm & check in** at the desk, including walk-ins who never applied.
+  - Organizers see where each applicant is: "Approval emailed. Waiting for them to confirm",
+    "Confirmed from the email", and so on.
+  - Applicants can withdraw ("I can't make it" once confirmed). Applying again puts them back in
+    the queue.
 - **QR check-in desk** (volunteers and organizers): scan someone's pass, or search for them by name
   if they don't have their phone. A large green, amber or red card shows the result. Each person can
   only check in once per event.
 - **Teams**: everyone registers with their own account, then builds a project together. Teams can
-  form as soon as people are approved; nobody has to wait for check-in. One teammate creates the team
+  form as soon as people confirm their spot; nobody has to wait for check-in. One teammate creates the team
   project and gets a **team code** (like `ABCDE-FGHJK`) with a QR code and a Share button.
   Teammates join by scanning that QR code or typing the code. Rules:
   - Teams have at most 4 members.
@@ -92,8 +101,8 @@ The logic is in `profiling/AttendanceProfiler.kt`. It's plain Kotlin and has uni
 
 - A person's history starts at their **first engagement**: the first event they checked in to, or
   registered for and missed. Events before that don't count against them.
-- A **no-show** is an event that has ended, which they were approved for but never checked in to.
-  Pending, waitlisted and declined applications never count against anyone.
+- A **no-show** is an event that has ended, which they confirmed a spot for but never checked in
+  to. Unconfirmed, pending, waitlisted and declined applications never count against anyone.
   Events that are still running or haven't started never count as missed.
 - **Attendance rate** = events attended ÷ eligible events since first engagement.
 - **Tiers**: 1 event is First-timer, 2 to 3 is Returning, 4 or more is Veteran.
@@ -109,8 +118,9 @@ events/{eventId}                                  name, location, description, s
                                                   endEpochDay, createdBy, createdAt
 events/{eventId}/checkIns/{uid}                   userId, checkedInAt, checkedInBy, method (QR | MANUAL)
 events/{eventId}/registrations/{uid}              userId, registeredAt, status (PENDING | APPROVED |
-                                                  WAITLISTED | DECLINED), reviewedBy, reviewedAt,
-                                                  notifiedStatus, notifiedAt
+                                                  CONFIRMED | WAITLISTED | DECLINED), reviewedBy,
+                                                  reviewedAt, confirmedAt, confirmedVia,
+                                                  resendRequestedAt, notifiedStatus, notifiedAt
 events/{eventId}/projects/{teamCode}              title, description, link, memberIds,
                                                   members {uid: name}, createdBy, assignedJudges,
                                                   createdAt, updatedAt
@@ -120,6 +130,7 @@ events/{eventId}/projects/{teamCode}/scores/{judgeUid}
 events/{eventId}/teamMembers/{uid}                projectId
 events/{eventId}/results/leaderboard              entries, publishedAt, publishedBy
 mail/{id}                                         outgoing email (Cloud Functions only)
+confirmTokens/{token}                             confirmation links (Cloud Functions only)
 ```
 
 Using people's uids as document ids gives each person at most one check-in and registration per
@@ -146,7 +157,8 @@ changing a team updates the project and these records together.
      cd firebase
      npx firebase ext:install firebase/firestore-send-email
      ```
-6. Deploy the security rules, indexes and the email function:
+6. Deploy the security rules, indexes and the email functions (`onRegistrationDecision` sends
+   emails; `confirmAttendance` is the page behind the "Confirm my spot" button):
    ```
    cd firebase
    npm install && (cd functions && npm install)
@@ -154,6 +166,9 @@ changing a team updates the project and these records together.
    npx firebase use --add        # pick your project
    npm run deploy
    ```
+   By default the button links to
+   `https://us-central1-<project-id>.cloudfunctions.net/confirmAttendance`. To use your own domain,
+   set the `CONFIRM_BASE_URL` environment variable for the functions (in `firebase/functions/.env`).
 7. **Create the first organizer**: sign up in the app, then in the Firebase console open
    Firestore → `users` → your document and change `role` to `ORGANIZER`. After that, promote
    everyone else from inside the app.
@@ -177,6 +192,7 @@ scanner, which needs Google Play services on the device and no camera permission
 ./gradlew assembleDebug         # build the APK
 ./gradlew testDebugUnitTest     # profiler, judging, calendar, QR pass and role unit tests
 cd firebase && npm install && (cd functions && npm install) && npm test
-                                # security rules, email templates and the email function
+                                # security rules, email templates, the email function and the
+                                # confirmation page
                                 # (runs the Firestore and Functions emulators; needs Java)
 ```

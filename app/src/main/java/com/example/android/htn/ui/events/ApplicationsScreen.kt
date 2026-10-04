@@ -130,9 +130,14 @@ fun ApplicationsScreen(eventId: String, me: UserProfile, onBack: () -> Unit, onO
             onDismissRequest = { pendingDecision = null },
             title = { Text("${decisionVerb(status)} $name?") },
             text = {
+                val email = applicant.user?.email ?: "their account email"
                 Text(
-                    if (status == RegistrationStatus.PENDING) "Their application goes back to pending. No email is sent."
-                    else "$name will be emailed at ${applicant.user?.email ?: "their account email"}."
+                    when (status) {
+                        RegistrationStatus.PENDING -> "Their application goes back to pending. No email is sent, and any confirmation link they have stops working."
+                        RegistrationStatus.APPROVED -> "$name will be emailed at $email with a button to confirm their spot. They can't form a team or check in until they confirm."
+                        RegistrationStatus.CONFIRMED -> "Use this if $name confirmed another way (for example by replying to you). They'll be emailed a confirmation."
+                        else -> "$name will be emailed at $email."
+                    }
                 )
             },
             confirmButton = {
@@ -154,6 +159,7 @@ fun ApplicationsScreen(eventId: String, me: UserProfile, onBack: () -> Unit, onO
 
 private fun decisionVerb(status: RegistrationStatus) = when (status) {
     RegistrationStatus.APPROVED -> "Approve"
+    RegistrationStatus.CONFIRMED -> "Mark confirmed"
     RegistrationStatus.WAITLISTED -> "Waitlist"
     RegistrationStatus.DECLINED -> "Decline"
     RegistrationStatus.PENDING -> "Move back to pending"
@@ -201,6 +207,11 @@ private fun ApplicantCard(applicant: Applicant, onDecide: (RegistrationStatus) -
 
 private fun emailStatus(reg: Registration): String = when {
     reg.status == RegistrationStatus.PENDING -> "Not reviewed yet."
+    reg.status == RegistrationStatus.APPROVED && reg.notifiedStatus == reg.status ->
+        "Approval emailed. Waiting for them to confirm."
+    reg.status == RegistrationStatus.CONFIRMED ->
+        (if (reg.confirmedVia == "email") "Confirmed from the email." else "Marked confirmed by an organizer.") +
+            if (reg.notifiedStatus == reg.status) " Receipt emailed." else ""
     reg.notifiedStatus == reg.status -> "Emailed: ${reg.status.label.lowercase()}."
-    else -> "Sending ${reg.status.label.lowercase()} email…"
+    else -> "Sending email…"
 }
