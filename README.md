@@ -15,12 +15,12 @@ data that's meant for it.
 |---|:-:|:-:|:-:|:-:|
 | Tabs | Profile, Events, My projects | Profile, Events, Judging | Profile, Events | Profile, Events, People, Projects |
 | Own profile, QR pass, own attendance, event calendar, register for events | ✓ | ✓ | ✓ | ✓ |
-| Submit a project for an event they were checked in to | ✓ | | | |
-| See every project submission | | ✓ | | ✓ |
-| Score projects (only their own scores are visible to them) | | ✓ | | |
+| Create or join a team project at an event they're checked in to | ✓ | | | |
+| See published results; teams see their own scores and notes | ✓ | ✓ | ✓ | ✓ |
+| See and score the projects assigned to them (only their own scores) | | ✓ | | |
 | Check people in (QR or manual), see arrivals | | | ✓ | ✓ |
 | See everyone: people directory, attendance profiles, event stats, all scores, leaderboard | | | | ✓ |
-| Create/delete events, remove projects, change roles | | | | ✓ |
+| Assign judges, publish results, create/delete events, remove projects, change roles | | | | ✓ |
 
 Everyone signs up as a **participant**. Organizers promote people from the person's profile
 (People tab → tap someone → *Change role*). The Firestore security rules in
@@ -31,23 +31,41 @@ Everyone signs up as a **participant**. Organizers promote people from the perso
 - **Sign in / create account** with email and password, including password reset.
 - **Profile**: your details (editable), a full-brightness QR check-in pass, your attendance history,
   and a role-specific section:
-  - Participants: projects submitted.
-  - Judges: how many projects you've scored and how many are left.
+  - Participants: your team projects.
+  - Judges: how many projects you've been assigned, scored and have left.
   - Volunteers: how many people you've checked in, total and today.
   - Organizers: an overview of people by role, upcoming events, check-ins and projects.
 - **Events: list or calendar.** The calendar is a month grid with a dot on days that have events.
   Multi-day events (like a hackathon weekend) appear on every day they span. Tap a day to see its
-  events. Organizers can tap + to create an event starting on the selected day.
+  events. Organizers can tap + to create an event starting on the selected day, then pick its
+  dates from a calendar.
 - **QR check-in desk** (volunteers and organizers): scan someone's pass, or search for them by name
   if they don't have their phone. A large green, amber or red card shows the result. Each person can
   only check in once per event.
-- **Project submissions**: once checked in, participants submit their project (name, description,
-  link, teammates) from the event page. They can edit or withdraw it until the event ends.
-- **Judging**: judges see each event's projects with what they've scored and what's left. They score
-  each project from 1 to 10 on Innovation, Technical difficulty, Design and Impact, plus notes. Judges
-  can't see each other's scores.
-- **Leaderboard** (organizers): projects ranked by average total across judges. Ties share a rank.
-  Tap a project to see every judge's breakdown and notes.
+- **Teams**: everyone registers and checks in with their own account, then builds a project
+  together. One teammate creates the team project and gets a **team code** (like `ABCDE-FGHJK`)
+  with a QR code and a Share button. Teammates join by scanning that QR code or typing the code.
+  Rules:
+  - Teams have at most 4 members.
+  - Each person can be on only one team per event.
+  - Everyone on a team must be checked in.
+  - Any member can edit the project until the event ends; members can leave, and the last one out
+    deletes the project.
+- **Judge assignment** (organizers): *Auto-assign judges* gives every project the chosen number of
+  judges and balances the load across judges, keeping any existing assignments. Organizers can also
+  assign or unassign judges by hand on each project. Judges only see and score the projects
+  assigned to them.
+- **Judging**: judges get a to-do list with progress for each event. They score each project 1–10
+  on Innovation, Technical difficulty, Design and Impact, plus notes. Judges can't see each other's
+  scores.
+- **Leaderboard** (organizers): projects ranked by average total across judges (ties share a rank),
+  showing how many assigned judges have scored each one. Tap a project to see every judge's
+  breakdown.
+- **Published results**: organizers publish a snapshot of the leaderboard, and can update or
+  unpublish it later. Once results are published:
+  - Everyone can see the rankings from the event page.
+  - Each team also sees its own per-criterion averages and judges' notes. Judges are shown as
+    "Judge 1", "Judge 2" and so on, not by name.
 - **People** (organizers): search, filter by role, sort by attendance, and open anyone's profile
   with their attendance history and projects.
 
@@ -73,14 +91,20 @@ events/{eventId}                                  name, location, description, s
                                                   endEpochDay, createdBy, createdAt
 events/{eventId}/checkIns/{uid}                   userId, checkedInAt, checkedInBy, method (QR | MANUAL)
 events/{eventId}/registrations/{uid}              userId, registeredAt
-events/{eventId}/projects/{uid}                   title, description, link, teamMembers,
-                                                  submittedBy, submitterName, createdAt, updatedAt
-events/{eventId}/projects/{uid}/scores/{judgeUid} judgeId, innovation, technical, design, impact,
+events/{eventId}/projects/{teamCode}              title, description, link, memberIds,
+                                                  members {uid: name}, createdBy, assignedJudges,
+                                                  createdAt, updatedAt
+events/{eventId}/projects/{teamCode}/scores/{judgeUid}
+                                                  judgeId, innovation, technical, design, impact,
                                                   comment, updatedAt
+events/{eventId}/teamMembers/{uid}                projectId
+events/{eventId}/results/leaderboard              entries, publishedAt, publishedBy
 ```
 
-Using people's uids as document ids gives each person at most one check-in, registration and
-project per event, and each judge one score per project.
+Using people's uids as document ids gives each person at most one check-in and registration per
+event, and each judge one score per project. `teamMembers/{uid}` can only be created once, which
+limits each person to one team per event. The rules use `getAfter()` to require that every write
+changing a team updates the project and these records together.
 
 ### One-time setup
 

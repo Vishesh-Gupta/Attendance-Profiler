@@ -27,13 +27,13 @@ class QrPassAndRoleTest {
     @Test
     fun rolePermissionsMatchFirestoreRules() {
         fun perms(role: Role) = listOf(
-            role.canCheckIn, role.canSeeEveryone, role.canManageEvents, role.canJudge, role.canSeeAllProjects,
+            role.canCheckIn, role.canSeeEveryone, role.canManageEvents, role.canJudge,
         )
-        //                                       checkIn everyone manage  judge  projects
-        assertEquals(listOf(false, false, false, false, false), perms(Role.PARTICIPANT))
-        assertEquals(listOf(false, false, false, true, true), perms(Role.JUDGE))
-        assertEquals(listOf(true, false, false, false, false), perms(Role.VOLUNTEER))
-        assertEquals(listOf(true, true, true, false, true), perms(Role.ORGANIZER))
+        //                                       checkIn everyone manage  judge
+        assertEquals(listOf(false, false, false, false), perms(Role.PARTICIPANT))
+        assertEquals(listOf(false, false, false, true), perms(Role.JUDGE))
+        assertEquals(listOf(true, false, false, false), perms(Role.VOLUNTEER))
+        assertEquals(listOf(true, true, true, false), perms(Role.ORGANIZER))
     }
 
     @Test

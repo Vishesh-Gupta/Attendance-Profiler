@@ -30,8 +30,8 @@
       ]
     },
     {
-      "collectionGroup": "projects",
-      "fieldPath": "submittedBy",
+      "collectionGroup": "scores",
+      "fieldPath": "judgeId",
       "indexes": [
         {
           "order": "ASCENDING",
@@ -44,15 +44,29 @@
       ]
     },
     {
-      "collectionGroup": "scores",
-      "fieldPath": "judgeId",
+      "collectionGroup": "projects",
+      "fieldPath": "memberIds",
       "indexes": [
         {
-          "order": "ASCENDING",
+          "arrayConfig": "CONTAINS",
           "queryScope": "COLLECTION"
         },
         {
-          "order": "ASCENDING",
+          "arrayConfig": "CONTAINS",
+          "queryScope": "COLLECTION_GROUP"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "projects",
+      "fieldPath": "assignedJudges",
+      "indexes": [
+        {
+          "arrayConfig": "CONTAINS",
+          "queryScope": "COLLECTION"
+        },
+        {
+          "arrayConfig": "CONTAINS",
           "queryScope": "COLLECTION_GROUP"
         }
       ]
