@@ -128,7 +128,12 @@ fun EventDetailScreen(
                         Button(onClick = onOpenResults, modifier = Modifier.fillMaxWidth()) { Text("See results") }
                     }
                     if (me.role == Role.PARTICIPANT) {
-                        TeamCard(state.myTeam, checkedIn = state.checkedIn, eventOver = eventOver, onOpen = onOpenTeam)
+                        TeamCard(
+                            state.myTeam,
+                            attending = state.registered || state.checkedIn,
+                            eventOver = eventOver,
+                            onOpen = onOpenTeam,
+                        )
                     }
                     if (me.role.canSeeEveryone || me.role.canJudge) {
                         ProjectsCard(state.projectCount, me.role, onOpenProjects)
@@ -181,7 +186,7 @@ private fun MyStatusCard(registered: Boolean, checkedIn: Boolean, upcoming: Bool
 }
 
 @Composable
-private fun TeamCard(team: Project?, checkedIn: Boolean, eventOver: Boolean, onOpen: () -> Unit) {
+private fun TeamCard(team: Project?, attending: Boolean, eventOver: Boolean, onOpen: () -> Unit) {
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("Your team", style = MaterialTheme.typography.titleMedium)
@@ -189,10 +194,10 @@ private fun TeamCard(team: Project?, checkedIn: Boolean, eventOver: Boolean, onO
                 team != null -> {
                     Text(team.title, style = MaterialTheme.typography.bodyLarge)
                     Text(team.teamLabel, style = MaterialTheme.typography.bodySmall)
-                    OutlinedButton(onClick = onOpen) { Text(if (eventOver) "View project" else "Manage team & project") }
+                    OutlinedButton(onClick = onOpen) { Text(if (eventOver) "View project" else "Manage, edit or switch team") }
                 }
                 eventOver -> Text("You didn't submit a project for this event.")
-                !checkedIn -> Text("Once you're checked in, start a team project or join your teammates'.")
+                !attending -> Text("Register above to start a team project or join your teammates' (no need to wait for check-in).")
                 else -> {
                     Text("Start a team project, or join your teammates with their team code.")
                     Button(onClick = onOpen) { Text("Create or join a team") }

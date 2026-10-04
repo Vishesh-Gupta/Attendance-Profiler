@@ -54,15 +54,21 @@ import com.example.android.htn.ui.userMessage
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 
-private data class TeamState(val event: Event?, val team: Project?, val checkedIn: Boolean)
+/** [attending]: registered or checked in, which is what it takes to create or join a team. */
+private data class TeamState(val event: Event?, val team: Project?, val attending: Boolean)
 
 /** A participant's team for one event: create or join it, share its code, edit the project, or leave. */
 @Composable
 fun TeamScreen(eventId: String, me: UserProfile, onBack: () -> Unit) {
     val repository = rememberApp().repository
     val stateFlow = remember(eventId, me.uid) {
-        combine(repository.event(eventId), repository.teamOf(eventId, me.uid), repository.checkInsOf(me.uid)) { e, t, c ->
-            TeamState(e, t, c.any { it.eventId == eventId })
+        combine(
+            repository.event(eventId),
+            repository.teamOf(eventId, me.uid),
+            repository.checkInsOf(me.uid),
+            repository.registrationsOf(me.uid),
+        ) { e, t, checkIns, registrations ->
+            TeamState(e, t, checkIns.any { it.eventId == eventId } || registrations.any { it.eventId == eventId })
         }
     }
     val state by stateFlow.collectAsStateWithLifecycle(initialValue = null)
@@ -111,12 +117,23 @@ fun TeamScreen(eventId: String, me: UserProfile, onBack: () -> Unit) {
                             run("Project saved") { repository.updateProject(eventId, team.id, title, description, link) }
                         },
                     )
-                    if (open) LeaveTeamButton(team, me, busy) { run { repository.leaveTeam(team, me) } }
+                    if (open) {
+                        HorizontalDivider()
+                        Text("Switch teams", style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            "You can only be on one team per event. To join a different team, leave this one first.",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        LeaveTeamButton(team, me, busy) { run("You left the team") { repository.leaveTeam(team, me) } }
+                    }
                 }
                 !open -> Text("Project submissions for this event are closed.")
-                !s.checkedIn -> Text(
-                    "You need to be checked in before you can create or join a team. Show your pass at the check-in desk."
-                )
+                !s.attending -> {
+                    Text("Register for this event to create or join a team. You can do this before check-in.")
+                    Button(onClick = { run("You're registered") { repository.register(eventId, me.uid) } }, enabled = !busy) {
+                        Text("Register")
+                    }
+                }
                 else -> {
                     JoinTeamSection(eventId, busy, onError = { scope.launch { snackbar.showSnackbar(it) } }) { code ->
                         run("You joined the team") { repository.joinTeam(eventId, code, me) }
@@ -125,7 +142,7 @@ fun TeamScreen(eventId: String, me: UserProfile, onBack: () -> Unit) {
                     Text("Or start a new team", style = MaterialTheme.typography.titleMedium)
                     Text(
                         "You'll get a team code to share. Up to ${Project.MAX_TEAM_SIZE} people per team, " +
-                            "and each teammate must be checked in.",
+                            "and each teammate needs to be registered for the event.",
                         style = MaterialTheme.typography.bodySmall,
                     )
                     ProjectForm(
@@ -261,15 +278,15 @@ private fun ProjectForm(
 private fun LeaveTeamButton(team: Project, me: UserProfile, busy: Boolean, onLeave: () -> Unit) {
     var confirm by remember { mutableStateOf(false) }
     val last = team.memberIds == listOf(me.uid)
-    TextButton(onClick = { confirm = true }, enabled = !busy) { Text(if (last) "Delete project" else "Leave team") }
+    OutlinedButton(onClick = { confirm = true }, enabled = !busy) { Text(if (last) "Delete project & leave" else "Leave team") }
     if (confirm) {
         AlertDialog(
             onDismissRequest = { confirm = false },
             title = { Text(if (last) "Delete project?" else "Leave team?") },
             text = {
                 Text(
-                    if (last) "You're the only member, so the project will be deleted."
-                    else "Your teammates keep the project. You can join or start another team afterwards."
+                    if (last) "You're the only member, so the project will be deleted. You can then join or start another team."
+                    else "Your teammates keep the project. You can then join or start another team."
                 )
             },
             confirmButton = { TextButton(onClick = { confirm = false; onLeave() }) { Text(if (last) "Delete" else "Leave") } },

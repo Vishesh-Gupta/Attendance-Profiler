@@ -109,10 +109,11 @@ service cloud.firestore {
         allow delete: if isSelf(userId) || isOrganizer();
       }
 
-      // A team's project. Each person registers and checks in individually, then one teammate
-      // creates the project and the others join it with its id (the team code). Membership is
-      // mirrored in teamMembers/{uid}, which can only be created once, so each person is on at most
-      // one team per event. Every write that changes membership must update both in the same batch.
+      // A team's project. Each person registers individually; once registered (or checked in as a
+      // walk-in) one teammate creates the project and the others join it with its id (the team code).
+      // Membership is mirrored in teamMembers/{uid}, which can only be created once, so each person is
+      // on at most one team per event: to switch teams they leave (deleting it) and then join another.
+      // Every write that changes membership must update both in the same batch.
       match /projects/{projectId} {
         function projectFields(p) {
           return shortText(p.title, 1)
@@ -127,8 +128,9 @@ service cloud.firestore {
             && p.members.size() == p.memberIds.size();
         }
 
-        function checkedIn(uid) {
-          return exists(/databases/$(database)/documents/events/$(eventId)/checkIns/$(uid));
+        function attending(uid) {
+          return exists(/databases/$(database)/documents/events/$(eventId)/registrations/$(uid))
+            || exists(/databases/$(database)/documents/events/$(eventId)/checkIns/$(uid));
         }
 
         function membershipAfter(uid) {
@@ -140,7 +142,7 @@ service cloud.firestore {
         }
 
         allow create: if signedIn()
-          && checkedIn(request.auth.uid)
+          && attending(request.auth.uid)
           && eventNotOver(eventId)
           && request.resource.data.keys().hasOnly(
             ['title', 'description', 'link', 'memberIds', 'members', 'createdBy', 'assignedJudges', 'createdAt', 'updatedAt'])
@@ -162,10 +164,10 @@ service cloud.firestore {
           && projectFields(request.resource.data)
           && request.resource.data.updatedAt == request.time;
 
-        // Someone checked in joins (adds only themselves).
+        // Someone registered or checked in joins (adds only themselves).
         allow update: if signedIn()
           && !(request.auth.uid in resource.data.memberIds)
-          && checkedIn(request.auth.uid)
+          && attending(request.auth.uid)
           && eventNotOver(eventId)
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['memberIds', 'members'])
           && request.resource.data.memberIds.toSet() == resource.data.memberIds.toSet().union([request.auth.uid].toSet())
