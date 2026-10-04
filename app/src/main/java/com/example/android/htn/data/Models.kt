@@ -38,6 +38,17 @@ data class Event(
 ) {
     fun isOver(todayEpochDay: Long): Boolean = endEpochDay < todayEpochDay
     fun isOn(epochDay: Long): Boolean = epochDay in startEpochDay..endEpochDay
+
+    /** Last day teams can be created, joined or left, and approved people can withdraw. */
+    val teamDeadlineEpochDay: Long get() = startEpochDay - TEAM_LOCK_DAYS
+
+    /** True until the team deadline has passed. After it, teams are locked and nobody accepted can back out. */
+    fun teamsOpen(todayEpochDay: Long): Boolean = todayEpochDay <= teamDeadlineEpochDay
+
+    companion object {
+        /** Keep in sync with firebase/firestore.rules (beforeTeamDeadline) and functions/emails.js. */
+        const val TEAM_LOCK_DAYS = 14L
+    }
 }
 
 enum class CheckInMethod { QR, MANUAL }

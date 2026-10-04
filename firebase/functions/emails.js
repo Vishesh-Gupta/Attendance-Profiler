@@ -17,6 +17,13 @@ const formatDates = (event) => {
     : `${formatDay(event.startEpochDay)} – ${formatDay(end)}`;
 };
 
+/** Keep in sync with the 14-day team lock in firestore.rules and Event.TEAM_LOCK_DAYS in the app. */
+const TEAM_LOCK_DAYS = 14;
+
+const deadlineNote = (e) =>
+  `Important: teams must be formed by ${formatDay(e.startEpochDay - TEAM_LOCK_DAYS)}. ` +
+  "From then on, teams are locked and you can't withdraw from the event.";
+
 const TEMPLATES = {
   APPROVED: {
     subject: (e) => `You're approved for ${e.name}: please confirm your spot`,
@@ -24,6 +31,7 @@ const TEMPLATES = {
       `Great news: you've been approved to attend ${e.name}.`,
       'Please confirm that you\'re coming using the button below. Your spot isn\'t final until you do, ' +
         'and you can\'t form a team or check in before confirming.',
+      deadlineNote(e),
     ],
     needsConfirmation: true,
   },
@@ -33,6 +41,7 @@ const TEMPLATES = {
       `Thanks for confirming! Your spot at ${e.name} is locked in.`,
       `What's next:\n• Open Attendance Profiler and form your team (up to 4 people) from the event page.\n` +
         '• At the event, show the QR pass on your Profile tab at the check-in desk.',
+      deadlineNote(e),
     ],
   },
   WAITLISTED: {
@@ -109,4 +118,4 @@ function confirmPage({ title, message, eventName, formAction }) {
 </main></body></html>`;
 }
 
-module.exports = { decisionEmail, confirmPage, NOTIFY_STATUSES, escapeHtml, formatDates };
+module.exports = { decisionEmail, confirmPage, NOTIFY_STATUSES, TEAM_LOCK_DAYS, escapeHtml, formatDates };

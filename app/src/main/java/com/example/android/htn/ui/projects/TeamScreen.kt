@@ -50,6 +50,7 @@ import com.example.android.htn.ui.components.LoadingBox
 import com.example.android.htn.ui.components.QrCode
 import com.example.android.htn.ui.components.rememberQrScanner
 import com.example.android.htn.ui.rememberApp
+import com.example.android.htn.ui.formatEpochDay
 import com.example.android.htn.ui.todayEpochDay
 import com.example.android.htn.ui.userMessage
 import kotlinx.coroutines.flow.combine
@@ -93,28 +94,32 @@ fun TeamScreen(eventId: String, me: UserProfile, onBack: () -> Unit) {
     ) { padding ->
         val s = state ?: return@Scaffold LoadingBox(Modifier.padding(padding))
         val event = s.event ?: return@Scaffold Text("This event no longer exists.", Modifier.padding(padding).padding(16.dp))
-        val open = !event.isOver(todayEpochDay())
+        val today = todayEpochDay()
+        // Membership (create, join, leave) locks at the team deadline; details stay editable until the end.
+        val teamsOpen = event.teamsOpen(today)
+        val editable = !event.isOver(today)
         Column(
             Modifier.fillMaxSize().padding(padding).imePadding().verticalScroll(rememberScrollState()).padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             Text(event.name, style = MaterialTheme.typography.titleMedium)
+            TeamDeadlineNote(event, teamsOpen)
             val team = s.team
             when {
                 team != null -> {
-                    if (open && team.members.size < Project.MAX_TEAM_SIZE) TeamCodeCard(event, team)
+                    if (teamsOpen && team.members.size < Project.MAX_TEAM_SIZE) TeamCodeCard(event, team)
                     MembersCard(team, me)
                     ProjectForm(
                         key = team.id,
                         initial = team,
-                        editable = open,
+                        editable = editable,
                         busy = busy,
                         submitLabel = "Save changes",
                         onSubmit = { title, description, link ->
                             run("Project saved") { repository.updateProject(eventId, team.id, title, description, link) }
                         },
                     )
-                    if (open) {
+                    if (teamsOpen) {
                         HorizontalDivider()
                         Text("Switch teams", style = MaterialTheme.typography.titleMedium)
                         Text(
@@ -124,7 +129,9 @@ fun TeamScreen(eventId: String, me: UserProfile, onBack: () -> Unit) {
                         LeaveTeamButton(team, me, busy) { run("You left the team") { repository.leaveTeam(team, me) } }
                     }
                 }
-                !open -> Text("Project submissions for this event are closed.")
+                !teamsOpen -> Text(
+                    "You're not on a team, and teams for this event are locked, so it's too late to create or join one."
+                )
                 s.application == null -> {
                     Text("Apply to attend this event first. Once you're approved and confirm your spot, you can create or join a team.")
                     Button(onClick = { run("Application sent") { repository.register(eventId, me.uid) } }, enabled = !busy) {
@@ -171,6 +178,18 @@ fun TeamScreen(eventId: String, me: UserProfile, onBack: () -> Unit) {
             }
         }
     }
+}
+
+@Composable
+private fun TeamDeadlineNote(event: Event, teamsOpen: Boolean) {
+    val deadline = formatEpochDay(event.teamDeadlineEpochDay)
+    Text(
+        if (teamsOpen) "Teams lock on $deadline (${Event.TEAM_LOCK_DAYS} days before the event). After that you can't " +
+            "create, join or leave a team, but you can keep editing your project."
+        else "Teams locked on $deadline.",
+        style = MaterialTheme.typography.bodySmall,
+        color = if (teamsOpen) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error,
+    )
 }
 
 @Composable

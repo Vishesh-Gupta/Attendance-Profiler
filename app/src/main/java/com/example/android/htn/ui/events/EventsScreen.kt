@@ -245,6 +245,12 @@ private fun CreateEventDialog(
                 }
                 OutlinedTextField(description, { description = it }, label = { Text("Description (optional)") },
                     minLines = 2)
+                Text(
+                    "Teams lock, and accepted people can no longer withdraw, ${Event.TEAM_LOCK_DAYS} days before the start " +
+                        "(${start.minusDays(Event.TEAM_LOCK_DAYS).format(fmt)}).",
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
             }
         },
         confirmButton = {
