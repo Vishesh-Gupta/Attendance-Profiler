@@ -49,6 +49,12 @@ service cloud.firestore {
       return exists(path) && get(path).data.status == 'CONFIRMED';
     }
 
+    // Teams lock, and approved people can no longer withdraw, 14 days before an event starts.
+    // Keep in sync with Event.TEAM_LOCK_DAYS in the app. One day of slack for time zones.
+    function beforeTeamDeadline(eventId) {
+      return today() - 1 <= get(eventPath(eventId)).data.startEpochDay - 14;
+    }
+
     function eventNotOver(eventId) {
       let event = get(eventPath(eventId)).data;
       return event.get('endEpochDay', event.startEpochDay) >= today() - 1;
@@ -145,12 +151,16 @@ service cloud.firestore {
           && (!('resendRequestedAt' in resource.data)
             || request.time > resource.data.resendRequestedAt + duration.value(5, 'm'));
 
-        // Withdrawing; applying again starts over as PENDING.
-        allow delete: if isSelf(userId) || isOrganizer();
+        // Withdrawing; applying again starts over as PENDING. Approved or confirmed people can't back
+        // out in the final 14 days before the event (organizers can still remove anyone).
+        allow delete: if isOrganizer()
+          || (isSelf(userId)
+            && (!(resource.data.status in ['APPROVED', 'CONFIRMED']) || beforeTeamDeadline(eventId)));
       }
 
       // A team's project. Each person registers individually; once confirmed, one teammate creates
-      // the project and the others join it with its id (the team code).
+      // the project and the others join it with its id (the team code). Team membership locks 14 days
+      // before the event starts; members can keep editing the project details until it ends.
       // Membership is mirrored in teamMembers/{uid}, which can only be created once, so each person is
       // on at most one team per event: to switch teams they leave (deleting it) and then join another.
       // Every write that changes membership must update both in the same batch.
@@ -178,7 +188,7 @@ service cloud.firestore {
 
         allow create: if signedIn()
           && isConfirmed(eventId, request.auth.uid)
-          && eventNotOver(eventId)
+          && beforeTeamDeadline(eventId)
           && request.resource.data.keys().hasOnly(
             ['title', 'description', 'link', 'memberIds', 'members', 'createdBy', 'assignedJudges', 'createdAt', 'updatedAt'])
           && projectFields(request.resource.data)
@@ -203,7 +213,7 @@ service cloud.firestore {
         allow update: if signedIn()
           && !(request.auth.uid in resource.data.memberIds)
           && isConfirmed(eventId, request.auth.uid)
-          && eventNotOver(eventId)
+          && beforeTeamDeadline(eventId)
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['memberIds', 'members'])
           && request.resource.data.memberIds.toSet() == resource.data.memberIds.toSet().union([request.auth.uid].toSet())
           && request.resource.data.memberIds.size() == resource.data.memberIds.size() + 1
@@ -216,7 +226,7 @@ service cloud.firestore {
         // A member leaves (removes only themselves); the last member deletes the project instead.
         allow update: if signedIn()
           && request.auth.uid in resource.data.memberIds
-          && eventNotOver(eventId)
+          && beforeTeamDeadline(eventId)
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['memberIds', 'members'])
           && request.resource.data.memberIds.toSet() == resource.data.memberIds.toSet().difference([request.auth.uid].toSet())
           && request.resource.data.memberIds.size() == resource.data.memberIds.size() - 1
@@ -232,7 +242,7 @@ service cloud.firestore {
 
         allow delete: if isOrganizer()
           || (signedIn() && resource.data.memberIds == [request.auth.uid]
-            && eventNotOver(eventId)
+            && beforeTeamDeadline(eventId)
             && !existsAfter(membershipAfter(request.auth.uid)));
 
         // Document id is the judge's uid: one score per judge per project.

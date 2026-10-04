@@ -244,6 +244,25 @@ describe('registrations', () => {
     await assertFails(updateDoc(doc(db('ada'), 'events/htn/registrations/ada'), { resendRequestedAt: serverTimestamp() }));
   });
 
+  test('approved or confirmed people cannot withdraw in the final 14 days; pending can', async () => {
+    await env.withSecurityRulesDisabled(async (ctx) => {
+      const admin = ctx.firestore();
+      await setDoc(doc(admin, 'events/far'), {
+        name: 'Far', location: '', description: '', startEpochDay: TODAY + 30, endEpochDay: TODAY + 30,
+        createdBy: 'org', createdAt: new Date(),
+      });
+      await approve(admin, 'htn', 'ada', 'CONFIRMED'); // htn starts yesterday: inside the window
+      await approve(admin, 'htn', 'cat', 'APPROVED');
+      await approve(admin, 'htn', 'dan', 'PENDING');
+      await approve(admin, 'far', 'ada', 'CONFIRMED');
+    });
+    await assertFails(deleteDoc(doc(db('ada'), 'events/htn/registrations/ada')));
+    await assertFails(deleteDoc(doc(db('cat'), 'events/htn/registrations/cat')));
+    await assertSucceeds(deleteDoc(doc(db('dan'), 'events/htn/registrations/dan')));
+    await assertSucceeds(deleteDoc(doc(db('ada'), 'events/far/registrations/ada')));
+    await assertSucceeds(deleteDoc(doc(db('org'), 'events/htn/registrations/ada')));
+  });
+
   test('cannot apply to an event that is over', async () => {
     await assertFails(setDoc(doc(db('ada'), 'events/old/registrations/ada'), registration('ada')));
   });
@@ -284,7 +303,7 @@ const checkInAll = (admin, eventId, uids) => {
 };
 
 // Same writes the app makes (AttendanceRepository.createProject / joinTeam / leaveTeam).
-const createProject = (uid, projectId, eventId = 'htn', overrides = {}) => {
+const createProject = (uid, projectId, eventId = 'future', overrides = {}) => {
   const fs = db(uid);
   const batch = writeBatch(fs);
   batch.set(doc(fs, `events/${eventId}/projects/${projectId}`), {
@@ -295,7 +314,7 @@ const createProject = (uid, projectId, eventId = 'htn', overrides = {}) => {
   return batch.commit();
 };
 
-const joinTeam = (uid, projectId, eventId = 'htn') => {
+const joinTeam = (uid, projectId, eventId = 'future') => {
   const fs = db(uid);
   const batch = writeBatch(fs);
   batch.update(doc(fs, `events/${eventId}/projects/${projectId}`), {
@@ -305,34 +324,38 @@ const joinTeam = (uid, projectId, eventId = 'htn') => {
   return batch.commit();
 };
 
-const leaveTeam = (uid, projectId) => {
+const leaveTeam = (uid, projectId, eventId = 'future') => {
   const fs = db(uid);
   const batch = writeBatch(fs);
-  batch.update(doc(fs, `events/htn/projects/${projectId}`), {
+  batch.update(doc(fs, `events/${eventId}/projects/${projectId}`), {
     memberIds: arrayRemove(uid), [`members.${uid}`]: deleteField(),
   });
-  batch.delete(doc(fs, `events/htn/teamMembers/${uid}`));
+  batch.delete(doc(fs, `events/${eventId}/teamMembers/${uid}`));
   return batch.commit();
 };
 
-const seedTeam = (admin, projectId, memberIds, assignedJudges = []) => {
+const seedTeam = (admin, projectId, memberIds, assignedJudges = [], eventId = 'htn') => {
   return Promise.all([
-    setDoc(doc(admin, `events/htn/projects/${projectId}`), {
+    setDoc(doc(admin, `events/${eventId}/projects/${projectId}`), {
       title: projectId, description: 'd', link: '', memberIds,
       members: Object.fromEntries(memberIds.map((m) => [m, m])), createdBy: memberIds[0],
       assignedJudges, createdAt: new Date(), updatedAt: new Date(),
     }),
-    ...memberIds.map((m) => setDoc(doc(admin, `events/htn/teamMembers/${m}`), { projectId })),
+    ...memberIds.map((m) => setDoc(doc(admin, `events/${eventId}/teamMembers/${m}`), { projectId })),
   ]);
 };
 
 describe('teams', () => {
+  // Team tests use an event a month away, before the 14-day team lock.
   beforeEach(() => env.withSecurityRulesDisabled(async (ctx) => {
     const admin = ctx.firestore();
-    await checkInAll(admin, 'htn', ['ada', 'cat', 'dan', 'eve', 'fay']);
-    for (const uid of ['ada', 'cat', 'dan', 'eve', 'fay', 'gus', 'hal']) await approve(admin, 'htn', uid);
-    await approve(admin, 'htn', 'ivy', 'PENDING');
-    await approve(admin, 'htn', 'jo', 'WAITLISTED');
+    await setDoc(doc(admin, 'events/future'), {
+      name: 'Future', location: '', description: '', startEpochDay: TODAY + 30, endEpochDay: TODAY + 32,
+      createdBy: 'org', createdAt: new Date(),
+    });
+    for (const uid of ['ada', 'cat', 'dan', 'eve', 'fay', 'gus', 'hal']) await approve(admin, 'future', uid);
+    await approve(admin, 'future', 'ivy', 'PENDING');
+    await approve(admin, 'future', 'jo', 'WAITLISTED');
   }));
 
   test('a checked-in participant creates a team project', async () => {
@@ -349,18 +372,49 @@ describe('teams', () => {
     await assertFails(createProject('ivy', 'TEAMCODE22'));
     await assertFails(joinTeam('ivy', 'TEAMCODE21'));
     await assertFails(joinTeam('jo', 'TEAMCODE21'));
-    await env.withSecurityRulesDisabled((ctx) => approve(ctx.firestore(), 'htn', 'kim', 'APPROVED'));
+    await env.withSecurityRulesDisabled((ctx) => approve(ctx.firestore(), 'future', 'kim', 'APPROVED'));
     await assertFails(joinTeam('kim', 'TEAMCODE21'));
   });
 
-  test('cannot create a project without confirming, or after the event', async () => {
+  test('cannot create a project without confirming', async () => {
     await assertFails(createProject('judge', 'TEAMCODE02'));
-    await assertFails(createProject('ada', 'TEAMCODE03', 'old'));
+  });
+
+  test('teams lock 14 days before the event: no creating, joining or leaving', async () => {
+    await env.withSecurityRulesDisabled(async (ctx) => {
+      const admin = ctx.firestore();
+      await setDoc(doc(admin, 'events/soon'), {
+        name: 'Soon', location: '', description: '', startEpochDay: TODAY + 10, endEpochDay: TODAY + 12,
+        createdBy: 'org', createdAt: new Date(),
+      });
+      for (const uid of ['ada', 'cat', 'dan']) await approve(admin, 'soon', uid);
+      await seedTeam(admin, 'LOCKED', ['ada', 'cat'], [], 'soon');
+    });
+    await assertFails(createProject('dan', 'TEAMCODE03', 'soon'));
+    await assertFails(joinTeam('dan', 'LOCKED', 'soon'));
+    await assertFails(leaveTeam('cat', 'LOCKED', 'soon'));
+    // Project details stay editable until the event ends.
+    await assertSucceeds(updateDoc(doc(db('cat'), 'events/soon/projects/LOCKED'), { title: 'Final', updatedAt: serverTimestamp() }));
+  });
+
+  test('the lock starts exactly 14 days before the first day', async () => {
+    await env.withSecurityRulesDisabled(async (ctx) => {
+      const admin = ctx.firestore();
+      for (const [id, start] of [['edge', TODAY + 14], ['past-edge', TODAY + 12]]) {
+        await setDoc(doc(admin, `events/${id}`), {
+          name: id, location: '', description: '', startEpochDay: start, endEpochDay: start,
+          createdBy: 'org', createdAt: new Date(),
+        });
+        await approve(admin, id, 'ada');
+      }
+    });
+    await assertSucceeds(createProject('ada', 'TEAMCODE23', 'edge'));
+    await assertFails(createProject('ada', 'TEAMCODE24', 'past-edge'));
   });
 
   test('cannot create a project without the membership record, or with other members', async () => {
     const fs = db('ada');
-    await assertFails(setDoc(doc(fs, 'events/htn/projects/SOLO'), {
+    await assertFails(setDoc(doc(fs, 'events/future/projects/SOLO'), {
       title: 'x', description: 'x', link: '', memberIds: ['ada'], members: { ada: 'ada' }, createdBy: 'ada',
       assignedJudges: [], createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
     }));
@@ -372,7 +426,7 @@ describe('teams', () => {
     await createProject('ada', 'TEAMCODE06');
     await assertSucceeds(joinTeam('cat', 'TEAMCODE06'));
     await assertSucceeds(joinTeam('dan', 'TEAMCODE06'));
-    const project = await getDoc(doc(db('cat'), 'events/htn/projects/TEAMCODE06'));
+    const project = await getDoc(doc(db('cat'), 'events/future/projects/TEAMCODE06'));
     if (project.data().memberIds.length !== 3) throw new Error('expected 3 members');
   });
 
@@ -396,7 +450,7 @@ describe('teams', () => {
     await assertFails(joinTeam('dan', 'TEAMCODE18'));
     await assertSucceeds(leaveTeam('dan', 'TEAMCODE17'));
     await assertSucceeds(joinTeam('dan', 'TEAMCODE18'));
-    const old = await getDoc(doc(db('ada'), 'events/htn/projects/TEAMCODE17'));
+    const old = await getDoc(doc(db('ada'), 'events/future/projects/TEAMCODE17'));
     if (old.data().memberIds.includes('dan')) throw new Error('dan should have left');
   });
 
@@ -405,7 +459,7 @@ describe('teams', () => {
     await createProject('cat', 'TEAMCODE20');
     const fs = db('ada');
     const batch = writeBatch(fs);
-    batch.update(doc(fs, 'events/htn/projects/TEAMCODE20'), { memberIds: arrayUnion('ada'), 'members.ada': 'ada' });
+    batch.update(doc(fs, 'events/future/projects/TEAMCODE20'), { memberIds: arrayUnion('ada'), 'members.ada': 'ada' });
     await assertFails(batch.commit()); // ada's existing teamMembers record blocks a second membership
   });
 
@@ -418,7 +472,7 @@ describe('teams', () => {
     await createProject('ada', 'TEAMCODE12');
     const fs = db('ada');
     const batch = writeBatch(fs);
-    batch.update(doc(fs, 'events/htn/projects/TEAMCODE12'), { memberIds: arrayUnion('cat'), 'members.cat': 'cat' });
+    batch.update(doc(fs, 'events/future/projects/TEAMCODE12'), { memberIds: arrayUnion('cat'), 'members.cat': 'cat' });
     await assertFails(batch.commit());
   });
 
@@ -428,27 +482,27 @@ describe('teams', () => {
     await assertSucceeds(leaveTeam('cat', 'TEAMCODE13'));
     const fs = db('ada');
     const batch = writeBatch(fs);
-    batch.delete(doc(fs, 'events/htn/projects/TEAMCODE13'));
-    batch.delete(doc(fs, 'events/htn/teamMembers/ada'));
+    batch.delete(doc(fs, 'events/future/projects/TEAMCODE13'));
+    batch.delete(doc(fs, 'events/future/teamMembers/ada'));
     await assertSucceeds(batch.commit());
   });
 
   test('members edit details; others cannot', async () => {
     await createProject('ada', 'TEAMCODE14');
     await joinTeam('cat', 'TEAMCODE14');
-    await assertSucceeds(updateDoc(doc(db('cat'), 'events/htn/projects/TEAMCODE14'), { title: 'New', updatedAt: serverTimestamp() }));
-    await assertFails(updateDoc(doc(db('dan'), 'events/htn/projects/TEAMCODE14'), { title: 'Hijack', updatedAt: serverTimestamp() }));
-    await assertFails(updateDoc(doc(db('ada'), 'events/htn/projects/TEAMCODE14'), { createdBy: 'cat' }));
+    await assertSucceeds(updateDoc(doc(db('cat'), 'events/future/projects/TEAMCODE14'), { title: 'New', updatedAt: serverTimestamp() }));
+    await assertFails(updateDoc(doc(db('dan'), 'events/future/projects/TEAMCODE14'), { title: 'Hijack', updatedAt: serverTimestamp() }));
+    await assertFails(updateDoc(doc(db('ada'), 'events/future/projects/TEAMCODE14'), { createdBy: 'cat' }));
   });
 
   test('members query their projects; non-members cannot read them', async () => {
     await createProject('ada', 'TEAMCODE15');
     await joinTeam('cat', 'TEAMCODE15');
     await assertSucceeds(getDocs(query(collectionGroup(db('cat'), 'projects'), where('memberIds', 'array-contains', 'cat'))));
-    await assertFails(getDoc(doc(db('dan'), 'events/htn/projects/TEAMCODE15')));
-    await assertSucceeds(getDoc(doc(db('cat'), 'events/htn/teamMembers/cat')));
-    await assertSucceeds(getDoc(doc(db('dan'), 'events/htn/teamMembers/dan'))); // missing doc: "not in a team"
-    await assertFails(getDoc(doc(db('dan'), 'events/htn/teamMembers/cat')));
+    await assertFails(getDoc(doc(db('dan'), 'events/future/projects/TEAMCODE15')));
+    await assertSucceeds(getDoc(doc(db('cat'), 'events/future/teamMembers/cat')));
+    await assertSucceeds(getDoc(doc(db('dan'), 'events/future/teamMembers/dan'))); // missing doc: "not in a team"
+    await assertFails(getDoc(doc(db('dan'), 'events/future/teamMembers/cat')));
   });
 });
 

@@ -51,6 +51,7 @@ import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.example.android.htn.data.CheckInMethod
 import com.example.android.htn.data.CheckInResult
+import com.example.android.htn.data.Event
 import com.example.android.htn.data.Project
 import com.example.android.htn.data.RegistrationStatus
 import com.example.android.htn.data.Role
@@ -59,6 +60,7 @@ import com.example.android.htn.ui.components.BackTopBar
 import com.example.android.htn.ui.components.LoadingBox
 import com.example.android.htn.ui.components.StatCard
 import com.example.android.htn.ui.components.rememberQrScanner
+import com.example.android.htn.ui.formatEpochDay
 import com.example.android.htn.ui.formatEventDates
 import com.example.android.htn.ui.rememberApp
 import com.example.android.htn.ui.todayEpochDay
@@ -121,11 +123,20 @@ fun EventDetailScreen(
                     )
                     if (event.description.isNotBlank()) Text(event.description)
                     val eventOver = event.isOver(todayEpochDay())
+                    val teamsOpen = event.teamsOpen(todayEpochDay())
+                    if (!eventOver) {
+                        Text(
+                            (if (teamsOpen) "Teams lock and withdrawals close on " else "Teams locked on ") +
+                                formatEpochDay(event.teamDeadlineEpochDay) + ".",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
                     MyStatusCard(
                         status = state.myStatus,
                         email = me.email,
                         checkedIn = state.checkedIn,
                         upcoming = !eventOver,
+                        canWithdraw = teamsOpen,
                         onSetRegistered = vm::setRegistered,
                         onResendEmail = vm::resendConfirmationEmail,
                     )
@@ -140,6 +151,7 @@ fun EventDetailScreen(
                             state.myTeam,
                             status = state.myStatus,
                             eventOver = eventOver,
+                            teamsOpen = teamsOpen,
                             onOpen = onOpenTeam,
                         )
                     }
@@ -184,6 +196,7 @@ private fun MyStatusCard(
     email: String,
     checkedIn: Boolean,
     upcoming: Boolean,
+    canWithdraw: Boolean,
     onSetRegistered: (Boolean) -> Unit,
     onResendEmail: () -> Unit,
 ) {
@@ -225,8 +238,15 @@ private fun MyStatusCard(
                     if (status == RegistrationStatus.APPROVED) {
                         Button(onClick = onResendEmail) { Text("Resend confirmation email") }
                     }
-                    if (status != RegistrationStatus.DECLINED) {
-                        OutlinedButton(onClick = { confirmWithdraw = true }) {
+                    val accepted = status == RegistrationStatus.APPROVED || status == RegistrationStatus.CONFIRMED
+                    when {
+                        status == RegistrationStatus.DECLINED -> Unit
+                        accepted && !canWithdraw -> Text(
+                            "It's less than ${Event.TEAM_LOCK_DAYS} days before the event, so you can no longer withdraw. " +
+                                "Contact the organizers if something comes up.",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        else -> OutlinedButton(onClick = { confirmWithdraw = true }) {
                             Text(if (status == RegistrationStatus.CONFIRMED) "I can't make it" else "Withdraw application")
                         }
                     }
@@ -262,7 +282,13 @@ private fun ApplicationsCard(counts: Map<RegistrationStatus, Int>, onOpen: () ->
 }
 
 @Composable
-private fun TeamCard(team: Project?, status: RegistrationStatus?, eventOver: Boolean, onOpen: () -> Unit) {
+private fun TeamCard(
+    team: Project?,
+    status: RegistrationStatus?,
+    eventOver: Boolean,
+    teamsOpen: Boolean,
+    onOpen: () -> Unit,
+) {
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("Your team", style = MaterialTheme.typography.titleMedium)
@@ -270,9 +296,18 @@ private fun TeamCard(team: Project?, status: RegistrationStatus?, eventOver: Boo
                 team != null -> {
                     Text(team.title, style = MaterialTheme.typography.bodyLarge)
                     Text(team.teamLabel, style = MaterialTheme.typography.bodySmall)
-                    OutlinedButton(onClick = onOpen) { Text(if (eventOver) "View project" else "Manage, edit or switch team") }
+                    OutlinedButton(onClick = onOpen) {
+                        Text(
+                            when {
+                                eventOver -> "View project"
+                                teamsOpen -> "Manage, edit or switch team"
+                                else -> "Edit project"
+                            }
+                        )
+                    }
                 }
                 eventOver -> Text("You didn't submit a project for this event.")
+                !teamsOpen -> Text("Teams are locked for this event, and you're not on one.")
                 status == RegistrationStatus.APPROVED -> Text("Confirm your spot from the email first, then you can start or join a team.")
                 status != RegistrationStatus.CONFIRMED -> Text(
                     "Once you're approved and have confirmed your spot, you can start a team project or join your " +
