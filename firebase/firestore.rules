@@ -41,6 +41,13 @@ service cloud.firestore {
     // Epoch day (UTC) of the request, with a day of slack either way for time zones.
     function today() { return int(request.time.toMillis() / 86400000); }
 
+    // Registrations are applications that organizers review. Only approved people can form teams,
+    // and participants must be approved before they can be checked in.
+    function isApproved(eventId, uid) {
+      let path = /databases/$(database)/documents/events/$(eventId)/registrations/$(uid);
+      return exists(path) && get(path).data.status == 'APPROVED';
+    }
+
     function eventNotOver(eventId) {
       let event = get(eventPath(eventId)).data;
       return event.get('endEpochDay', event.startEpochDay) >= today() - 1;
@@ -90,6 +97,7 @@ service cloud.firestore {
       match /checkIns/{userId} {
         allow create: if canCheckIn()
           && exists(userPath(userId))
+          && (get(userPath(userId)).data.role != 'PARTICIPANT' || isApproved(eventId, userId))
           && request.resource.data.keys().hasOnly(['userId', 'checkedInAt', 'checkedInBy', 'method'])
           && request.resource.data.userId == userId
           && request.resource.data.checkedInBy == request.auth.uid
@@ -99,18 +107,40 @@ service cloud.firestore {
         allow delete: if canCheckIn();
       }
 
+      // An application to attend. People apply as PENDING; organizers decide. The decision email is
+      // sent by the onRegistrationDecision Cloud Function, which also records notifiedStatus.
       match /registrations/{userId} {
         allow create: if isSelf(userId)
           && exists(eventPath(eventId))
-          && request.resource.data.keys().hasOnly(['userId', 'registeredAt'])
+          && eventNotOver(eventId)
+          && request.resource.data.keys().hasOnly(['userId', 'registeredAt', 'status'])
           && request.resource.data.userId == userId
-          && request.resource.data.registeredAt == request.time;
+          && request.resource.data.registeredAt == request.time
+          && request.resource.data.status == 'PENDING';
 
+        // Organizers can record a decision for someone who never applied (e.g. a walk-in at the desk).
+        allow create: if isOrganizer()
+          && exists(userPath(userId))
+          && exists(eventPath(eventId))
+          && request.resource.data.keys().hasOnly(['userId', 'registeredAt', 'status', 'reviewedBy', 'reviewedAt'])
+          && request.resource.data.userId == userId
+          && request.resource.data.registeredAt == request.time
+          && request.resource.data.status in ['APPROVED', 'WAITLISTED', 'DECLINED']
+          && request.resource.data.reviewedBy == request.auth.uid
+          && request.resource.data.reviewedAt == request.time;
+
+        allow update: if isOrganizer()
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'reviewedBy', 'reviewedAt'])
+          && request.resource.data.status in ['PENDING', 'APPROVED', 'WAITLISTED', 'DECLINED']
+          && request.resource.data.reviewedBy == request.auth.uid
+          && request.resource.data.reviewedAt == request.time;
+
+        // Withdrawing; applying again starts over as PENDING.
         allow delete: if isSelf(userId) || isOrganizer();
       }
 
-      // A team's project. Each person registers individually; once registered (or checked in as a
-      // walk-in) one teammate creates the project and the others join it with its id (the team code).
+      // A team's project. Each person registers individually; once approved, one teammate creates
+      // the project and the others join it with its id (the team code).
       // Membership is mirrored in teamMembers/{uid}, which can only be created once, so each person is
       // on at most one team per event: to switch teams they leave (deleting it) and then join another.
       // Every write that changes membership must update both in the same batch.
@@ -128,11 +158,6 @@ service cloud.firestore {
             && p.members.size() == p.memberIds.size();
         }
 
-        function attending(uid) {
-          return exists(/databases/$(database)/documents/events/$(eventId)/registrations/$(uid))
-            || exists(/databases/$(database)/documents/events/$(eventId)/checkIns/$(uid));
-        }
-
         function membershipAfter(uid) {
           return /databases/$(database)/documents/events/$(eventId)/teamMembers/$(uid);
         }
@@ -142,7 +167,7 @@ service cloud.firestore {
         }
 
         allow create: if signedIn()
-          && attending(request.auth.uid)
+          && isApproved(eventId, request.auth.uid)
           && eventNotOver(eventId)
           && request.resource.data.keys().hasOnly(
             ['title', 'description', 'link', 'memberIds', 'members', 'createdBy', 'assignedJudges', 'createdAt', 'updatedAt'])
@@ -164,10 +189,10 @@ service cloud.firestore {
           && projectFields(request.resource.data)
           && request.resource.data.updatedAt == request.time;
 
-        // Someone registered or checked in joins (adds only themselves).
+        // Someone approved joins (adds only themselves).
         allow update: if signedIn()
           && !(request.auth.uid in resource.data.memberIds)
-          && attending(request.auth.uid)
+          && isApproved(eventId, request.auth.uid)
           && eventNotOver(eventId)
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['memberIds', 'members'])
           && request.resource.data.memberIds.toSet() == resource.data.memberIds.toSet().union([request.auth.uid].toSet())
@@ -256,6 +281,9 @@ service cloud.firestore {
         allow delete: if isOrganizer();
       }
     }
+
+    // Outgoing email, written only by Cloud Functions and sent by the Trigger Email extension.
+    // No client access.
 
     // Reads, including collection-group queries. People who may only read their own documents
     // must filter their queries on the owner field.
