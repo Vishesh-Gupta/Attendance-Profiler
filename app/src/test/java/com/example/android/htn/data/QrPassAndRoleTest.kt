@@ -1,12 +1,10 @@
 package com.example.android.htn.data
 
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
-import org.junit.Assert.assertTrue
 import org.junit.Test
 
-class QrPassTest {
+class QrPassAndRoleTest {
 
     @Test
     fun roundTrip() {
@@ -27,14 +25,21 @@ class QrPassTest {
     }
 
     @Test
-    fun rolePermissions() {
-        assertFalse(Role.PARTICIPANT.isStaff)
-        assertTrue(Role.JUDGE.isStaff)
-        assertFalse(Role.JUDGE.canCheckIn)
-        assertTrue(Role.VOLUNTEER.canCheckIn)
-        assertFalse(Role.VOLUNTEER.canManageEvents)
-        assertTrue(Role.ORGANIZER.canManageEvents)
+    fun rolePermissionsMatchFirestoreRules() {
+        fun perms(role: Role) = listOf(
+            role.canCheckIn, role.canSeeEveryone, role.canManageEvents, role.canJudge, role.canSeeAllProjects,
+        )
+        //                                       checkIn everyone manage  judge  projects
+        assertEquals(listOf(false, false, false, false, false), perms(Role.PARTICIPANT))
+        assertEquals(listOf(false, false, false, true, true), perms(Role.JUDGE))
+        assertEquals(listOf(true, false, false, false, false), perms(Role.VOLUNTEER))
+        assertEquals(listOf(true, true, true, false, true), perms(Role.ORGANIZER))
+    }
+
+    @Test
+    fun unknownRolesFallBackToParticipant() {
         assertEquals(Role.PARTICIPANT, Role.parse("SUPERUSER"))
+        assertEquals(Role.PARTICIPANT, Role.parse(null))
         assertEquals(Role.JUDGE, Role.parse("JUDGE"))
     }
 }

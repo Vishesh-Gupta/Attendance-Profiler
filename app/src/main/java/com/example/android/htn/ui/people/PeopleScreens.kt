@@ -56,7 +56,7 @@ private enum class SortOrder(val label: String) { NAME("Name"), MOST_EVENTS("Mos
 
 private data class Person(val user: UserProfile, val profile: AttendanceProfile)
 
-/** Staff only: everyone with an account, profiled by attendance. */
+/** Organizers only: everyone with an account, profiled by attendance. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PeopleScreen(onOpenPerson: (String) -> Unit) {
@@ -142,9 +142,15 @@ fun PeopleScreen(onOpenPerson: (String) -> Unit) {
     }
 }
 
-/** Staff only. Organizers can also change the person's role here. */
+/** Organizers only: a person's attendance, projects and role. */
 @Composable
-fun PersonScreen(uid: String, me: UserProfile, onBack: () -> Unit, onOpenEvent: (String) -> Unit) {
+fun PersonScreen(
+    uid: String,
+    me: UserProfile,
+    onBack: () -> Unit,
+    onOpenEvent: (String) -> Unit,
+    onOpenProject: (eventId: String, projectId: String) -> Unit,
+) {
     val repository = rememberApp().repository
     val dataFlow = remember(uid) {
         combine(repository.user(uid), repository.events(), repository.checkInsOf(uid), repository.registrationsOf(uid)) {
@@ -153,6 +159,13 @@ fun PersonScreen(uid: String, me: UserProfile, onBack: () -> Unit, onOpenEvent: 
         }
     }
     val data by dataFlow.collectAsStateWithLifecycle(initialValue = null)
+    val projectsFlow = remember(uid) {
+        combine(repository.events(), repository.projectsOf(uid)) { events, projects ->
+            val byId = events.associateBy { it.id }
+            projects.mapNotNull { p -> byId[p.eventId]?.let { it to p } }.sortedByDescending { it.first.startEpochDay }
+        }
+    }
+    val projects by projectsFlow.collectAsStateWithLifecycle(initialValue = emptyList())
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
 
@@ -198,6 +211,16 @@ fun PersonScreen(uid: String, me: UserProfile, onBack: () -> Unit, onOpenEvent: 
                         }
                     }
                     ProfileStats(profile)
+                    if (projects.isNotEmpty()) {
+                        Text("Projects", style = MaterialTheme.typography.titleMedium)
+                        projects.forEach { (event, project) ->
+                            ListItem(
+                                headlineContent = { Text(project.title) },
+                                supportingContent = { Text(event.name) },
+                                modifier = Modifier.clickable { onOpenProject(event.id, project.submittedBy) },
+                            )
+                        }
+                    }
                     Text("History", style = MaterialTheme.typography.titleMedium)
                     if (profile.timeline.isEmpty()) Text("No past events yet.")
                 }

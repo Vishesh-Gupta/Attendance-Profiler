@@ -91,6 +91,15 @@ class AttendanceProfilerTest {
     }
 
     @Test
+    fun multiDayEventStillRunning_isNotANoShowYet() {
+        val weekend = Event(id = "w", name = "HTN weekend", location = "", startEpochDay = 600, endEpochDay = 602)
+        val during = AttendanceProfiler.profile(events + weekend, setOf("e5"), setOf("w"), todayEpochDay = 601)
+        assertEquals(0, during.noShows)
+        val after = AttendanceProfiler.profile(events + weekend, setOf("e5"), setOf("w"), todayEpochDay = 603)
+        assertEquals(1, after.noShows)
+    }
+
+    @Test
     fun futureEvents_areIgnoredUntilAttended() {
         val p = profile(setOf("e3", "e4"), today = 450)
         assertEquals(2, p.eligibleEvents)

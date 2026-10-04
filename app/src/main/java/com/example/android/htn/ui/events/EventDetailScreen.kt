@@ -50,12 +50,14 @@ import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.example.android.htn.data.CheckInMethod
 import com.example.android.htn.data.CheckInResult
+import com.example.android.htn.data.Project
+import com.example.android.htn.data.Role
 import com.example.android.htn.data.UserProfile
 import com.example.android.htn.ui.components.BackTopBar
 import com.example.android.htn.ui.components.LoadingBox
 import com.example.android.htn.ui.components.StatCard
 import com.example.android.htn.ui.components.rememberQrScanner
-import com.example.android.htn.ui.formatEpochDay
+import com.example.android.htn.ui.formatEventDates
 import com.example.android.htn.ui.rememberApp
 import com.example.android.htn.ui.todayEpochDay
 import java.text.DateFormat
@@ -67,6 +69,8 @@ fun EventDetailScreen(
     me: UserProfile,
     onBack: () -> Unit,
     onOpenPerson: (String) -> Unit,
+    onOpenProjects: () -> Unit,
+    onEditProject: () -> Unit,
 ) {
     val repository = rememberApp().repository
     val vm: EventDetailViewModel = viewModel(
@@ -107,23 +111,31 @@ fun EventDetailScreen(
             item {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text(
-                        listOf(formatEpochDay(event.startEpochDay), event.location)
+                        listOf(formatEventDates(event), event.location)
                             .filter { it.isNotBlank() }.joinToString(" · "),
                         style = MaterialTheme.typography.bodyLarge,
                     )
+                    if (event.description.isNotBlank()) Text(event.description)
+                    val eventOver = event.isOver(todayEpochDay())
                     MyStatusCard(
                         registered = state.registered,
                         checkedIn = state.checkedIn,
-                        upcoming = event.startEpochDay >= todayEpochDay(),
+                        upcoming = !eventOver,
                         onSetRegistered = vm::setRegistered,
                     )
+                    if (me.role == Role.PARTICIPANT && (state.myProject != null || (state.checkedIn && !eventOver))) {
+                        MyProjectCard(state.myProject, editable = !eventOver, onEdit = onEditProject)
+                    }
+                    if (me.role.canSeeAllProjects) {
+                        ProjectsCard(state.projectCount, me.role, onOpenProjects)
+                    }
                     if (me.role.canCheckIn) {
                         CheckInDesk(lastScan, onScan = scan, onDismiss = vm::dismissScan)
                     }
                 }
             }
             if (me.role.canCheckIn) manualCheckIn(state, vm)
-            if (me.role.isStaff) attendance(state, me, vm, onOpenPerson)
+            if (me.role.canCheckIn) attendance(state, me, vm, onOpenPerson)
         }
     }
 
@@ -159,6 +171,35 @@ private fun MyStatusCard(registered: Boolean, checkedIn: Boolean, upcoming: Bool
                 }
                 registered -> Text("You registered but weren't checked in.")
                 else -> Text("You didn't attend this event.")
+            }
+        }
+    }
+}
+
+@Composable
+private fun MyProjectCard(project: Project?, editable: Boolean, onEdit: () -> Unit) {
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Your project", style = MaterialTheme.typography.titleMedium)
+            if (project == null) {
+                Text("Submit what you built so judges can review it.")
+                Button(onClick = onEdit) { Text("Submit project") }
+            } else {
+                Text(project.title, style = MaterialTheme.typography.bodyLarge)
+                OutlinedButton(onClick = onEdit) { Text(if (editable) "View or edit" else "View") }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ProjectsCard(count: Int, role: Role, onOpen: () -> Unit) {
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Projects", style = MaterialTheme.typography.titleMedium)
+            Text("$count submitted")
+            Button(onClick = onOpen, enabled = count > 0) {
+                Text(if (role.canJudge) "Judge projects" else "Leaderboard & scores")
             }
         }
     }
@@ -247,10 +288,14 @@ private fun LazyListScope.attendance(
     vm: EventDetailViewModel,
     onOpenPerson: (String) -> Unit,
 ) {
-    val summary = state.summary ?: return
     item {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("Attendance", style = MaterialTheme.typography.titleMedium)
+            val summary = state.summary
+            if (summary == null) {
+                Text("${state.arrivals.size} checked in")
+                return@Column
+            }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 StatCard("Checked in", "${summary.checkedIn}", Modifier.weight(1f))
                 StatCard("Registered", "${summary.registered}", Modifier.weight(1f))
@@ -288,7 +333,7 @@ private fun LazyListScope.attendance(
                     }
                 }
             } else null,
-            modifier = Modifier.clickable { onOpenPerson(arrival.checkIn.userId) },
+            modifier = if (me.role.canSeeEveryone) Modifier.clickable { onOpenPerson(arrival.checkIn.userId) } else Modifier,
         )
         HorizontalDivider()
     }

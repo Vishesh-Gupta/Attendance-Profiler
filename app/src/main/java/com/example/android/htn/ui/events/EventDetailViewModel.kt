@@ -7,6 +7,7 @@ import com.example.android.htn.data.CheckIn
 import com.example.android.htn.data.CheckInMethod
 import com.example.android.htn.data.CheckInResult
 import com.example.android.htn.data.Event
+import com.example.android.htn.data.Project
 import com.example.android.htn.data.QrPass
 import com.example.android.htn.data.UserProfile
 import com.example.android.htn.profiling.AttendanceProfiler
@@ -30,12 +31,16 @@ data class EventDetailState(
     val event: Event? = null,
     val registered: Boolean = false,
     val checkedIn: Boolean = false,
-    /** Staff only. */
+    /** Organizers only. */
     val summary: EventSummary? = null,
-    /** Staff only, most recent first. */
+    /** Check-in staff only, most recent first. */
     val arrivals: List<Arrival> = emptyList(),
-    /** Staff only, for manual check-in. */
+    /** Check-in staff only, for manual check-in. */
     val people: List<UserProfile> = emptyList(),
+    /** The signed-in person's own submission, if any. */
+    val myProject: Project? = null,
+    /** Judges and organizers only. */
+    val projectCount: Int = 0,
 )
 
 sealed interface ScanOutcome {
@@ -57,12 +62,14 @@ class EventDetailViewModel(
     /** Result of the latest check-in attempt, shown prominently at the check-in desk. */
     val lastScan: StateFlow<ScanOutcome?> = _lastScan.asStateFlow()
 
-    val state: StateFlow<EventDetailState> = combine(
+    private val role = me.role
+
+    private val attendance = combine(
         repository.event(eventId),
         repository.events(),
-        if (me.role.isStaff) repository.allCheckIns() else repository.checkInsOf(me.uid),
-        if (me.role.isStaff) repository.allRegistrations() else repository.registrationsOf(me.uid),
-        if (me.role.isStaff) repository.users() else flowOf(listOf(me)),
+        if (role.canCheckIn) repository.allCheckIns() else repository.checkInsOf(me.uid),
+        if (role.canCheckIn) repository.allRegistrations() else repository.registrationsOf(me.uid),
+        if (role.canCheckIn) repository.users() else flowOf(listOf(me)),
     ) { event, events, checkIns, registrations, users ->
         val usersById = users.associateBy { it.uid }
         EventDetailState(
@@ -70,16 +77,24 @@ class EventDetailViewModel(
             event = event,
             registered = registrations.any { it.eventId == eventId && it.userId == me.uid },
             checkedIn = checkIns.any { it.eventId == eventId && it.userId == me.uid },
-            summary = if (me.role.isStaff && event != null) {
+            summary = if (role.canSeeEveryone && event != null) {
                 AttendanceProfiler.summarizeEvent(event, events, usersById, checkIns, registrations)
             } else null,
-            arrivals = if (me.role.isStaff) {
+            arrivals = if (role.canCheckIn) {
                 checkIns.filter { it.eventId == eventId }
                     .sortedByDescending { it.checkedInAt }
                     .map { Arrival(usersById[it.userId], it) }
             } else emptyList(),
-            people = if (me.role.canCheckIn) users else emptyList(),
+            people = if (role.canCheckIn) users else emptyList(),
         )
+    }
+
+    val state: StateFlow<EventDetailState> = combine(
+        attendance,
+        repository.project(eventId, me.uid),
+        if (role.canSeeAllProjects) repository.projectsForEvent(eventId) else flowOf(emptyList()),
+    ) { base, myProject, projects ->
+        base.copy(myProject = myProject, projectCount = projects.size)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), EventDetailState())
 
     fun setRegistered(register: Boolean) = launchReporting {
