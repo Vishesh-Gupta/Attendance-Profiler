@@ -1,0 +1,174 @@
+package com.example.android.htn.ui.events
+
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import com.example.android.htn.data.AttendanceRepository
+import com.example.android.htn.data.CheckIn
+import com.example.android.htn.data.CheckInMethod
+import com.example.android.htn.data.CheckInResult
+import com.example.android.htn.data.Event
+import com.example.android.htn.data.Project
+import com.example.android.htn.data.QrPass
+import com.example.android.htn.data.RegistrationStatus
+import com.example.android.htn.data.UserProfile
+import com.example.android.htn.profiling.AttendanceProfiler
+import com.example.android.htn.profiling.EventSummary
+import com.example.android.htn.ui.userMessage
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.receiveAsFlow
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
+
+data class Arrival(val user: UserProfile?, val checkIn: CheckIn)
+
+data class EventDetailState(
+    val loading: Boolean = true,
+    val event: Event? = null,
+    /** The signed-in person's application, or null if they haven't applied. */
+    val myStatus: RegistrationStatus? = null,
+    val checkedIn: Boolean = false,
+    /** Organizers only. */
+    val summary: EventSummary? = null,
+    /** Check-in staff only, most recent first. */
+    val arrivals: List<Arrival> = emptyList(),
+    /** Check-in staff only, for manual check-in. */
+    val people: List<UserProfile> = emptyList(),
+    /** Check-in staff only: application status by uid, to see who can be checked in. */
+    val applications: Map<String, RegistrationStatus> = emptyMap(),
+    /** The team the signed-in person is on for this event, if any. */
+    val myTeam: Project? = null,
+    /** Organizers: all projects. Judges: projects assigned to them. */
+    val projectCount: Int = 0,
+    val resultsPublished: Boolean = false,
+)
+
+sealed interface ScanOutcome {
+    data class Done(val result: CheckInResult, val method: CheckInMethod) : ScanOutcome
+    data object NotAPass : ScanOutcome
+    data class Failed(val message: String) : ScanOutcome
+}
+
+class EventDetailViewModel(
+    private val eventId: String,
+    private val me: UserProfile,
+    private val repository: AttendanceRepository,
+) : ViewModel() {
+
+    private val messageChannel = Channel<String>(Channel.BUFFERED)
+    val messages = messageChannel.receiveAsFlow()
+
+    private val _lastScan = MutableStateFlow<ScanOutcome?>(null)
+    /** Result of the latest check-in attempt, shown prominently at the check-in desk. */
+    val lastScan: StateFlow<ScanOutcome?> = _lastScan.asStateFlow()
+
+    private val role = me.role
+
+    private val attendance = combine(
+        repository.event(eventId),
+        repository.events(),
+        if (role.canCheckIn) repository.allCheckIns() else repository.checkInsOf(me.uid),
+        if (role.canCheckIn) repository.allRegistrations() else repository.registrationsOf(me.uid),
+        if (role.canCheckIn) repository.users() else flowOf(listOf(me)),
+    ) { event, events, checkIns, registrations, users ->
+        val usersById = users.associateBy { it.uid }
+        EventDetailState(
+            loading = false,
+            event = event,
+            myStatus = registrations.firstOrNull { it.eventId == eventId && it.userId == me.uid }?.status,
+            checkedIn = checkIns.any { it.eventId == eventId && it.userId == me.uid },
+            summary = if (role.canSeeEveryone && event != null) {
+                AttendanceProfiler.summarizeEvent(event, events, usersById, checkIns, registrations)
+            } else null,
+            arrivals = if (role.canCheckIn) {
+                checkIns.filter { it.eventId == eventId }
+                    .sortedByDescending { it.checkedInAt }
+                    .map { Arrival(usersById[it.userId], it) }
+            } else emptyList(),
+            people = if (role.canCheckIn) users else emptyList(),
+            applications = if (role.canCheckIn) {
+                registrations.filter { it.eventId == eventId }.associate { it.userId to it.status }
+            } else emptyMap(),
+        )
+    }
+
+    val state: StateFlow<EventDetailState> = combine(
+        attendance,
+        repository.teamOf(eventId, me.uid),
+        when {
+            role.canSeeEveryone -> repository.projectsForEvent(eventId)
+            role.canJudge -> repository.assignedProjects(eventId, me.uid)
+            else -> flowOf(emptyList())
+        },
+        repository.results(eventId),
+    ) { base, myTeam, projects, results ->
+        base.copy(myTeam = myTeam, projectCount = projects.size, resultsPublished = results != null)
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), EventDetailState())
+
+    fun setRegistered(register: Boolean) = launchReporting {
+        if (register) repository.register(eventId, me.uid) else repository.unregister(eventId, me.uid)
+    }
+
+    fun onScanned(raw: String) {
+        val uid = QrPass.decode(raw)
+        if (uid == null) _lastScan.value = ScanOutcome.NotAPass else checkIn(uid, CheckInMethod.QR)
+    }
+
+    fun onScanFailed(e: Exception) {
+        _lastScan.value = ScanOutcome.Failed(e.userMessage())
+    }
+
+    fun checkIn(userId: String, method: CheckInMethod) = viewModelScope.launch {
+        _lastScan.value = try {
+            ScanOutcome.Done(repository.checkIn(eventId, userId, me.uid, method), method)
+        } catch (e: Exception) {
+            ScanOutcome.Failed(e.userMessage())
+        }
+    }
+
+    fun dismissScan() {
+        _lastScan.value = null
+    }
+
+    /**
+     * Organizers only, at the desk: marks the person confirmed (they're here, so there's nothing to
+     * confirm by email) and checks them in. They're emailed a confirmation receipt.
+     */
+    fun approveAndCheckIn(user: UserProfile, method: CheckInMethod) = viewModelScope.launch {
+        _lastScan.value = try {
+            if (state.value.applications[user.uid] == null) {
+                repository.registerOnBehalf(eventId, user.uid, RegistrationStatus.CONFIRMED, me.uid)
+            } else {
+                repository.setRegistrationStatus(eventId, user.uid, RegistrationStatus.CONFIRMED, me.uid)
+            }
+            ScanOutcome.Done(repository.checkIn(eventId, user.uid, me.uid, method), method)
+        } catch (e: Exception) {
+            ScanOutcome.Failed(e.userMessage())
+        }
+    }
+
+    fun resendConfirmationEmail() = launchReporting {
+        repository.resendConfirmationEmail(eventId, me.uid)
+        messageChannel.trySend("Sent. Check your email for the Confirm button.")
+    }
+
+    fun undoCheckIn(userId: String) = launchReporting { repository.undoCheckIn(eventId, userId) }
+
+    fun deleteEvent(onDeleted: () -> Unit) = launchReporting {
+        repository.deleteEvent(eventId)
+        onDeleted()
+    }
+
+    private fun launchReporting(block: suspend () -> Unit) = viewModelScope.launch {
+        try {
+            block()
+        } catch (e: Exception) {
+            messageChannel.trySend(e.userMessage())
+        }
+    }
+}

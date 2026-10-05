@@ -1,0 +1,330 @@
+rules_version = '2';
+
+// Roles: PARTICIPANT, JUDGE, VOLUNTEER, ORGANIZER.
+// - Everyone signs up as PARTICIPANT; only organizers can change roles.
+// - Organizers see everything.
+// - Volunteers run check-in: they see people, registrations and check-ins.
+// - Judges only see the projects assigned to them and their own scores.
+// - Participants see their own profile, attendance and team projects, plus results once published.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function userPath(uid) {
+      return /databases/$(database)/documents/users/$(uid);
+    }
+
+    function eventPath(eventId) {
+      return /databases/$(database)/documents/events/$(eventId);
+    }
+
+    function hasRole(roles) {
+      return signedIn() && exists(userPath(request.auth.uid))
+        && get(userPath(request.auth.uid)).data.role in roles;
+    }
+
+    function isOrganizer() { return hasRole(['ORGANIZER']); }
+    function canCheckIn() { return hasRole(['VOLUNTEER', 'ORGANIZER']); }
+    function isJudge() { return hasRole(['JUDGE']); }
+
+    function isSelf(uid) { return signedIn() && request.auth.uid == uid; }
+
+    function text(value, minSize, maxSize) {
+      return value is string && value.size() >= minSize && value.size() <= maxSize;
+    }
+
+    function shortText(value, minSize) { return text(value, minSize, 100); }
+
+    // Epoch day (UTC) of the request, with a day of slack either way for time zones.
+    function today() { return int(request.time.toMillis() / 86400000); }
+
+    // Registrations are applications that organizers review. Approved applicants are emailed a link
+    // to confirm their spot; only CONFIRMED people can form teams, and participants must be confirmed
+    // before they can be checked in.
+    function isConfirmed(eventId, uid) {
+      let path = /databases/$(database)/documents/events/$(eventId)/registrations/$(uid);
+      return exists(path) && get(path).data.status == 'CONFIRMED';
+    }
+
+    // Teams lock, and approved people can no longer withdraw, 14 days before an event starts.
+    // Keep in sync with Event.TEAM_LOCK_DAYS in the app. One day of slack for time zones.
+    function beforeTeamDeadline(eventId) {
+      return today() - 1 <= get(eventPath(eventId)).data.startEpochDay - 14;
+    }
+
+    function eventNotOver(eventId) {
+      let event = get(eventPath(eventId)).data;
+      return event.get('endEpochDay', event.startEpochDay) >= today() - 1;
+    }
+
+    match /users/{uid} {
+      allow read: if isSelf(uid) || canCheckIn();
+
+      allow create: if isSelf(uid)
+        && request.resource.data.keys().hasOnly(['name', 'email', 'organization', 'role', 'createdAt'])
+        && shortText(request.resource.data.name, 1)
+        && shortText(request.resource.data.organization, 0)
+        && request.resource.data.email == request.auth.token.email
+        && request.resource.data.role == 'PARTICIPANT'
+        && request.resource.data.createdAt == request.time;
+
+      // Users edit their own name and organization; organizers change other people's roles.
+      allow update: if
+        (isSelf(uid)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name', 'organization'])
+          && shortText(request.resource.data.name, 1)
+          && shortText(request.resource.data.organization, 0))
+        || (isOrganizer() && !isSelf(uid)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['role'])
+          && request.resource.data.role in ['PARTICIPANT', 'JUDGE', 'VOLUNTEER', 'ORGANIZER']);
+    }
+
+    match /events/{eventId} {
+      allow read: if signedIn();
+
+      allow create: if isOrganizer()
+        && request.resource.data.keys().hasOnly(
+          ['name', 'location', 'description', 'startEpochDay', 'endEpochDay', 'createdBy', 'createdAt'])
+        && shortText(request.resource.data.name, 1)
+        && shortText(request.resource.data.location, 0)
+        && text(request.resource.data.description, 0, 2000)
+        && request.resource.data.startEpochDay is int
+        && request.resource.data.endEpochDay is int
+        && request.resource.data.endEpochDay >= request.resource.data.startEpochDay
+        && request.resource.data.endEpochDay - request.resource.data.startEpochDay <= 31
+        && request.resource.data.createdBy == request.auth.uid
+        && request.resource.data.createdAt == request.time;
+
+      allow delete: if isOrganizer();
+
+      // Document id is the attendee's uid, so each person checks in at most once per event.
+      match /checkIns/{userId} {
+        allow create: if canCheckIn()
+          && exists(userPath(userId))
+          && (get(userPath(userId)).data.role != 'PARTICIPANT' || isConfirmed(eventId, userId))
+          && request.resource.data.keys().hasOnly(['userId', 'checkedInAt', 'checkedInBy', 'method'])
+          && request.resource.data.userId == userId
+          && request.resource.data.checkedInBy == request.auth.uid
+          && request.resource.data.checkedInAt == request.time
+          && request.resource.data.method in ['QR', 'MANUAL'];
+
+        allow delete: if canCheckIn();
+      }
+
+      // An application to attend. People apply as PENDING; organizers approve, waitlist or decline.
+      // Approval emails a "confirm my spot" link (onRegistrationDecision); following it sets CONFIRMED
+      // (confirmAttendance). Those functions also record notifiedStatus and confirmedAt.
+      match /registrations/{userId} {
+        allow create: if isSelf(userId)
+          && exists(eventPath(eventId))
+          && eventNotOver(eventId)
+          && request.resource.data.keys().hasOnly(['userId', 'registeredAt', 'status'])
+          && request.resource.data.userId == userId
+          && request.resource.data.registeredAt == request.time
+          && request.resource.data.status == 'PENDING';
+
+        // Organizers can record a decision for someone who never applied (e.g. a walk-in at the desk).
+        allow create: if isOrganizer()
+          && exists(userPath(userId))
+          && exists(eventPath(eventId))
+          && request.resource.data.keys().hasOnly(['userId', 'registeredAt', 'status', 'reviewedBy', 'reviewedAt'])
+          && request.resource.data.userId == userId
+          && request.resource.data.registeredAt == request.time
+          && request.resource.data.status in ['APPROVED', 'CONFIRMED', 'WAITLISTED', 'DECLINED']
+          && request.resource.data.reviewedBy == request.auth.uid
+          && request.resource.data.reviewedAt == request.time;
+
+        allow update: if isOrganizer()
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'reviewedBy', 'reviewedAt'])
+          && request.resource.data.status in ['PENDING', 'APPROVED', 'CONFIRMED', 'WAITLISTED', 'DECLINED']
+          && request.resource.data.reviewedBy == request.auth.uid
+          && request.resource.data.reviewedAt == request.time;
+
+        // Approved applicants can ask for the confirmation email again, at most every 5 minutes.
+        allow update: if isSelf(userId)
+          && resource.data.status == 'APPROVED'
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['resendRequestedAt'])
+          && request.resource.data.resendRequestedAt == request.time
+          && (!('resendRequestedAt' in resource.data)
+            || request.time > resource.data.resendRequestedAt + duration.value(5, 'm'));
+
+        // Withdrawing; applying again starts over as PENDING. Approved or confirmed people can't back
+        // out in the final 14 days before the event (organizers can still remove anyone).
+        allow delete: if isOrganizer()
+          || (isSelf(userId)
+            && (!(resource.data.status in ['APPROVED', 'CONFIRMED']) || beforeTeamDeadline(eventId)));
+      }
+
+      // A team's project. Each person registers individually; once confirmed, one teammate creates
+      // the project and the others join it with its id (the team code). Team membership locks 14 days
+      // before the event starts; members can keep editing the project details until it ends.
+      // Membership is mirrored in teamMembers/{uid}, which can only be created once, so each person is
+      // on at most one team per event: to switch teams they leave (deleting it) and then join another.
+      // Every write that changes membership must update both in the same batch.
+      match /projects/{projectId} {
+        function projectFields(p) {
+          return shortText(p.title, 1)
+            && text(p.description, 1, 5000)
+            && text(p.link, 0, 500);
+        }
+
+        function membersMatch(p) {
+          return p.memberIds is list
+            && p.members is map
+            && p.members.keys().toSet() == p.memberIds.toSet()
+            && p.members.size() == p.memberIds.size();
+        }
+
+        function membershipAfter(uid) {
+          return /databases/$(database)/documents/events/$(eventId)/teamMembers/$(uid);
+        }
+
+        function joinsThisTeamAfter(uid) {
+          return existsAfter(membershipAfter(uid)) && getAfter(membershipAfter(uid)).data.projectId == projectId;
+        }
+
+        allow create: if signedIn()
+          && isConfirmed(eventId, request.auth.uid)
+          && beforeTeamDeadline(eventId)
+          && request.resource.data.keys().hasOnly(
+            ['title', 'description', 'link', 'memberIds', 'members', 'createdBy', 'assignedJudges', 'createdAt', 'updatedAt'])
+          && projectFields(request.resource.data)
+          && request.resource.data.memberIds == [request.auth.uid]
+          && membersMatch(request.resource.data)
+          && shortText(request.resource.data.members[request.auth.uid], 1)
+          && request.resource.data.createdBy == request.auth.uid
+          && request.resource.data.assignedJudges == []
+          && request.resource.data.createdAt == request.time
+          && request.resource.data.updatedAt == request.time
+          && joinsThisTeamAfter(request.auth.uid);
+
+        // Members edit the details.
+        allow update: if signedIn()
+          && request.auth.uid in resource.data.memberIds
+          && eventNotOver(eventId)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['title', 'description', 'link', 'updatedAt'])
+          && projectFields(request.resource.data)
+          && request.resource.data.updatedAt == request.time;
+
+        // Someone confirmed joins (adds only themselves).
+        allow update: if signedIn()
+          && !(request.auth.uid in resource.data.memberIds)
+          && isConfirmed(eventId, request.auth.uid)
+          && beforeTeamDeadline(eventId)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['memberIds', 'members'])
+          && request.resource.data.memberIds.toSet() == resource.data.memberIds.toSet().union([request.auth.uid].toSet())
+          && request.resource.data.memberIds.size() == resource.data.memberIds.size() + 1
+          && request.resource.data.memberIds.size() <= 4
+          && membersMatch(request.resource.data)
+          && request.resource.data.members.diff(resource.data.members).affectedKeys().hasOnly([request.auth.uid])
+          && shortText(request.resource.data.members[request.auth.uid], 1)
+          && joinsThisTeamAfter(request.auth.uid);
+
+        // A member leaves (removes only themselves); the last member deletes the project instead.
+        allow update: if signedIn()
+          && request.auth.uid in resource.data.memberIds
+          && beforeTeamDeadline(eventId)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['memberIds', 'members'])
+          && request.resource.data.memberIds.toSet() == resource.data.memberIds.toSet().difference([request.auth.uid].toSet())
+          && request.resource.data.memberIds.size() == resource.data.memberIds.size() - 1
+          && request.resource.data.memberIds.size() >= 1
+          && membersMatch(request.resource.data)
+          && !existsAfter(membershipAfter(request.auth.uid));
+
+        // Organizers assign judges.
+        allow update: if isOrganizer()
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['assignedJudges'])
+          && request.resource.data.assignedJudges is list
+          && request.resource.data.assignedJudges.size() <= 20;
+
+        allow delete: if isOrganizer()
+          || (signedIn() && resource.data.memberIds == [request.auth.uid]
+            && beforeTeamDeadline(eventId)
+            && !existsAfter(membershipAfter(request.auth.uid)));
+
+        // Document id is the judge's uid: one score per judge per project.
+        match /scores/{judgeId} {
+          function validScore(value) { return value is int && value >= 1 && value <= 10; }
+
+          allow create, update: if isJudge() && isSelf(judgeId)
+            && judgeId in get(/databases/$(database)/documents/events/$(eventId)/projects/$(projectId)).data.assignedJudges
+            && request.resource.data.keys().hasOnly(
+              ['judgeId', 'innovation', 'technical', 'design', 'impact', 'comment', 'updatedAt'])
+            && request.resource.data.judgeId == judgeId
+            && validScore(request.resource.data.innovation)
+            && validScore(request.resource.data.technical)
+            && validScore(request.resource.data.design)
+            && validScore(request.resource.data.impact)
+            && text(request.resource.data.comment, 0, 2000)
+            && request.resource.data.updatedAt == request.time;
+
+          allow delete: if isSelf(judgeId) || isOrganizer();
+
+          // Once results are published, team members see their own project's scores. Judges stay
+          // anonymous to them because participants can't read user profiles.
+          allow read: if signedIn()
+            && exists(/databases/$(database)/documents/events/$(eventId)/results/leaderboard)
+            && request.auth.uid in get(/databases/$(database)/documents/events/$(eventId)/projects/$(projectId)).data.memberIds;
+        }
+      }
+
+      match /teamMembers/{uid} {
+        function projectAfter(projectId) {
+          return /databases/$(database)/documents/events/$(eventId)/projects/$(projectId);
+        }
+
+        allow read: if isSelf(uid) || isOrganizer();
+
+        allow create: if isSelf(uid)
+          && request.resource.data.keys().hasOnly(['projectId'])
+          && request.resource.data.projectId is string
+          && existsAfter(projectAfter(request.resource.data.projectId))
+          && uid in getAfter(projectAfter(request.resource.data.projectId)).data.memberIds;
+
+        allow delete: if isOrganizer()
+          || (isSelf(uid) && (
+            !existsAfter(projectAfter(resource.data.projectId))
+            || !(uid in getAfter(projectAfter(resource.data.projectId)).data.memberIds)));
+      }
+
+      // Published results: a snapshot of the leaderboard that organizers write when they publish.
+      match /results/{docId} {
+        allow read: if signedIn();
+        allow create, update: if isOrganizer() && docId == 'leaderboard'
+          && request.resource.data.keys().hasOnly(['entries', 'publishedAt', 'publishedBy'])
+          && request.resource.data.entries is list
+          && request.resource.data.publishedAt == request.time
+          && request.resource.data.publishedBy == request.auth.uid;
+        allow delete: if isOrganizer();
+      }
+    }
+
+    // Outgoing email (mail) and confirmation links (confirmTokens) are written and read only by
+    // Cloud Functions. No client access.
+
+    // Reads, including collection-group queries. People who may only read their own documents
+    // must filter their queries on the owner field.
+    match /{path=**}/checkIns/{userId} {
+      allow read: if canCheckIn() || (signedIn() && resource.data.userId == request.auth.uid);
+    }
+
+    match /{path=**}/registrations/{userId} {
+      allow read: if canCheckIn() || (signedIn() && resource.data.userId == request.auth.uid);
+    }
+
+    // Organizers see every project, judges only those assigned to them, members their own team's.
+    match /{path=**}/projects/{projectId} {
+      allow read: if isOrganizer()
+        || (signedIn() && request.auth.uid in resource.data.memberIds)
+        || (isJudge() && request.auth.uid in resource.data.assignedJudges);
+    }
+
+    // Judges only see their own scores, so they score independently. Organizers see all of them.
+    match /{path=**}/scores/{judgeId} {
+      allow read: if isOrganizer() || (signedIn() && resource.data.judgeId == request.auth.uid);
+    }
+  }
+}
