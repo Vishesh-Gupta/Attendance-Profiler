@@ -1,5 +1,8 @@
 # Attendance Profiler
 
+[![Android](https://github.com/Vishesh-Gupta/Attendance-Profiler/actions/workflows/android.yml/badge.svg)](https://github.com/Vishesh-Gupta/Attendance-Profiler/actions/workflows/android.yml)
+[![Firebase](https://github.com/Vishesh-Gupta/Attendance-Profiler/actions/workflows/firebase.yml/badge.svg)](https://github.com/Vishesh-Gupta/Attendance-Profiler/actions/workflows/firebase.yml)
+
 An Android app (Kotlin + Jetpack Compose + Firebase) for running check-in at recurring events like
 Hack the North, and profiling everyone by their attendance history across events.
 
@@ -201,3 +204,14 @@ cd firebase && npm install && (cd functions && npm install) && npm test
                                 # confirmation page
                                 # (runs the Firestore and Functions emulators; needs Java)
 ```
+
+## Continuous integration
+
+GitHub Actions runs on every pull request and on every push to `main`:
+
+- **Android** (`.github/workflows/android.yml`): builds the debug APK, runs the unit tests and runs
+  Android Lint on JDK 17. Lint fails the build on errors; warnings are listed in the report.
+  Test and lint reports are uploaded as the `android-reports` artifact.
+- **Firebase** (`.github/workflows/firebase.yml`): installs `firebase/` and `firebase/functions/`
+  and runs `npm test`, which tests the security rules, email templates and Cloud Functions on the
+  Firestore and Functions emulators.
